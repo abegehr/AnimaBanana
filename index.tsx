@@ -30,6 +30,7 @@ const App = () => {
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [progress, setProgress] = useState(0);
+    const [isCyclic, setIsCyclic] = useState(false);
 
     const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -160,17 +161,15 @@ const App = () => {
         setIsLoading(true);
         setError(null);
         setFinalGif(null);
+        setProgress(0);
 
         const allFramesData = new Array<string | null>(NUM_FRAMES).fill(null);
-        allFramesData[0] = initialImage;
         setGeneratedFrames([...allFramesData]);
-        setProgress(1);
 
         // Helper to generate a single frame between a start and end point
         const generateSingleFrame = async (startIndex: number, endIndex: number) => {
             const midIndex = Math.floor((startIndex + endIndex) / 2);
 
-            // Abort if the boundary frames don't exist
             if (!allFramesData[startIndex] || !allFramesData[endIndex]) {
                 console.warn(`Skipping frame ${midIndex} due to missing boundary images.`);
                 return null;
@@ -208,52 +207,73 @@ const App = () => {
         };
 
         try {
-            // 1. Generate the last frame
+            // 1. Generate a "clean" first frame from the user upload for consistency.
             const initialFramePart = dataUrlToGenerativePart(initialImage);
-            const lastFrameResponse = await ai.models.generateContent({
+            const firstFrameResponse = await ai.models.generateContent({
                 model: 'gemini-2.5-flash-image-preview',
                 contents: {
                     parts: [
                         initialFramePart,
-                        { text: `This is the first frame of an animation. The full animation is described as: "${prompt}". Generate ONLY the final frame of this animation. Ensure the background is transparent.` },
+                        { text: `Redraw this character image exactly as it is. Crucially, ensure it has a perfectly transparent background. This will be the starting frame of an animation.` },
                     ],
                 },
                 config: { responseModalities: [Modality.IMAGE, Modality.TEXT] },
             });
-
-            const lastImagePart = lastFrameResponse.candidates?.[0]?.content.parts.find(p => 'inlineData' in p);
-            if (!lastImagePart || !('inlineData' in lastImagePart) || !lastImagePart.inlineData.data) {
-                throw new Error("API did not return the last frame.");
+            const firstImagePart = firstFrameResponse.candidates?.[0]?.content.parts.find(p => 'inlineData' in p);
+            if (!firstImagePart || !('inlineData' in firstImagePart) || !firstImagePart.inlineData.data) {
+                throw new Error("API did not return the initial frame.");
             }
-            const lastFrameBase64 = `data:${lastImagePart.inlineData.mimeType};base64,${lastImagePart.inlineData.data}`;
-            allFramesData[NUM_FRAMES - 1] = lastFrameBase64;
+            const processedInitialImage = `data:${firstImagePart.inlineData.mimeType};base64,${firstImagePart.inlineData.data}`;
+            allFramesData[0] = processedInitialImage;
             setGeneratedFrames([...allFramesData]);
-            setProgress(prev => prev + 1);
+            setProgress(1);
 
-            // 2. Iteratively generate in-between frames level by level
+
+            // 2. Determine and generate the last frame
+            if (isCyclic) {
+                allFramesData[NUM_FRAMES - 1] = processedInitialImage;
+                setProgress(prev => prev + 1); // Account for this step in progress
+            } else {
+                const lastFrameResponse = await ai.models.generateContent({
+                    model: 'gemini-2.5-flash-image-preview',
+                    contents: {
+                        parts: [
+                            dataUrlToGenerativePart(processedInitialImage),
+                            { text: `This is the first frame of an animation. The full animation is described as: "${prompt}". Generate ONLY the final frame of this animation. Ensure the background is transparent.` },
+                        ],
+                    },
+                    config: { responseModalities: [Modality.IMAGE, Modality.TEXT] },
+                });
+
+                const lastImagePart = lastFrameResponse.candidates?.[0]?.content.parts.find(p => 'inlineData' in p);
+                if (!lastImagePart || !('inlineData' in lastImagePart) || !lastImagePart.inlineData.data) {
+                    throw new Error("API did not return the last frame.");
+                }
+                const lastFrameBase64 = `data:${lastImagePart.inlineData.mimeType};base64,${lastImagePart.inlineData.data}`;
+                allFramesData[NUM_FRAMES - 1] = lastFrameBase64;
+                setProgress(prev => prev + 1);
+            }
+            setGeneratedFrames([...allFramesData]);
+
+
+            // 3. Iteratively generate in-between frames level by level
             let rangesToProcess: [number, number][] = [[0, NUM_FRAMES - 1]];
-
-            // Continue as long as there's a gap larger than 1 to fill
             while (rangesToProcess.some(([start, end]) => end - start > 1)) {
-                // Get all frames that need to be generated in this level
                 const promises = rangesToProcess
                     .filter(([start, end]) => end - start > 1)
                     .map(([start, end]) => generateSingleFrame(start, end));
 
                 const results = await Promise.all(promises);
                 
-                // Update the main frames array with the results
                 results.forEach(result => {
                     if (result) {
                         allFramesData[result.index] = result.frame;
                     }
                 });
 
-                // Update progress and UI
                 setProgress(prev => prev + results.filter(Boolean).length);
                 setGeneratedFrames([...allFramesData]);
                 
-                // Create the next level of smaller ranges
                 const nextRanges: [number, number][] = [];
                 rangesToProcess.forEach(([start, end]) => {
                     const mid = Math.floor((start + end) / 2);
@@ -324,6 +344,18 @@ const App = () => {
                             value={prompt}
                             onChange={(e) => setPrompt(e.target.value)}
                         />
+                    </div>
+                    <div className="flex items-center">
+                        <input
+                            id="cyclic-checkbox"
+                            type="checkbox"
+                            checked={isCyclic}
+                            onChange={(e) => setIsCyclic(e.target.checked)}
+                            className="h-4 w-4 rounded border-gray-500 bg-gray-700 text-purple-600 focus:ring-purple-600 focus:ring-offset-gray-800"
+                        />
+                        <label htmlFor="cyclic-checkbox" className="ml-3 block text-sm font-medium text-gray-300">
+                            Create cyclic animation (loops seamlessly)
+                        </label>
                     </div>
                     <button
                         onClick={generateAnimation}
