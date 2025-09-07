@@ -46,18 +46,40 @@ const checkTransparency = (canvas: HTMLCanvasElement): boolean => {
     return pixelDataTL[3] === 0 && pixelDataTR[3] === 0 && pixelDataBL[3] === 0 && pixelDataBR[3] === 0;
 };
 
+// Helper to compare two pose objects and identify changed parts
+const diffPoses = (poseA: Record<string, string>, poseB: Record<string, string>): { changedParts: string[]; unchangedParts: string[] } => {
+    const changedParts: string[] = [];
+    const unchangedParts: string[] = [];
+    if (!poseA || !poseB) return { changedParts, unchangedParts };
 
-const AnimationPlayer = ({ frames }: { frames: (string | null)[] }) => {
+    const allKeys = new Set([...Object.keys(poseA), ...Object.keys(poseB)]);
+
+    for (const key of allKeys) {
+        // We only care about the actual pose keys, not metadata
+        if (key === 'notes') continue; 
+        
+        if (poseA[key] !== poseB[key]) {
+            changedParts.push(key);
+        } else {
+            unchangedParts.push(key);
+        }
+    }
+    return { changedParts, unchangedParts };
+};
+
+
+const AnimationPlayer = ({ frames, fps }: { frames: (string | null)[]; fps: number; }) => {
     const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
 
     useEffect(() => {
+        const intervalDuration = 1000 / fps;
         // Set up a timer that cycles through all potential frame indices
         const interval = setInterval(() => {
             setCurrentFrameIndex((prevIndex) => (prevIndex + 1) % NUM_FRAMES);
-        }, 100); // 100ms for 10 FPS
+        }, intervalDuration);
 
         return () => clearInterval(interval);
-    }, []); // Run only once to set up the timer
+    }, [fps]); // Rerun effect if fps changes
 
     // For the current index, find the last available frame by looking backwards
     let imageToDisplay: string | null = null;
@@ -67,6 +89,16 @@ const AnimationPlayer = ({ frames }: { frames: (string | null)[] }) => {
             break;
         }
     }
+    // If we didn't find one going back, try finding the first available one from the start
+    if (!imageToDisplay) {
+        for (let i = 0; i < frames.length; i++) {
+            if (frames[i]) {
+                imageToDisplay = frames[i];
+                break;
+            }
+        }
+    }
+
 
     if (!imageToDisplay) {
         return null; // Don't render if no frames are available yet up to this point
@@ -93,6 +125,7 @@ const App = () => {
     const [isCyclic, setIsCyclic] = useState(false);
     const [loadingMessage, setLoadingMessage] = useState('');
     const [estimatedCost, setEstimatedCost] = useState(0);
+    const [fps, setFps] = useState(5);
 
     const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -168,11 +201,11 @@ const App = () => {
 
 
         // Helper to generate a single frame between a start and end point
-        const generateSingleFrame = async (startIndex: number, endIndex: number, frameDescription: Record<string, string>) => {
+        const generateSingleFrame = async (startIndex: number, endIndex: number, framePrompts: Record<string, string>[]) => {
             const midIndex = Math.floor((startIndex + endIndex) / 2);
 
-            if (!allFramesData[startIndex] || !allFramesData[endIndex]) {
-                console.warn(`Skipping frame ${midIndex} due to missing boundary images.`);
+            if (!allFramesData[startIndex] || !allFramesData[endIndex] || !framePrompts[startIndex] || !framePrompts[midIndex]) {
+                console.warn(`Skipping frame ${midIndex} due to missing boundary data.`);
                 return null;
             }
 
@@ -180,29 +213,44 @@ const App = () => {
                 const startFramePart = dataUrlToGenerativePart(allFramesData[startIndex]!);
                 const endFramePart = dataUrlToGenerativePart(allFramesData[endIndex]!);
                 
+                // Compare the target pose with the start pose to find what's different
+                const { changedParts, unchangedParts } = diffPoses(framePrompts[startIndex], framePrompts[midIndex]);
+
+                const changeDescription = changedParts.length > 0 
+                    ? changedParts.map(part => `  - ${part}: ${framePrompts[midIndex][part]}`).join('\n')
+                    : "  - No direct pose changes, but follow the 'notes' for this frame: " + framePrompts[midIndex]['notes'];
+                
+                const unchangedDescription = unchangedParts.length > 0 ? unchangedParts.join(', ') : 'All other parts';
+
+
                 const refinedPrompt = `
-You are an expert animator rendering a single, specific frame of an animation based on a detailed pose specification.
+You are an expert animator creating a single frame of an animation with extreme precision.
 
-**Context:** You are given the start frame and end frame for a small segment of a larger animation. These are for stylistic and positional reference ONLY.
-**Your Primary Task:** Your main goal is to generate the single frame that should appear exactly in the middle of the two provided frames. However, you MUST adhere strictly to the following precise pose description. Do not just interpolate; render this exact pose.
+**Context:** You are given two keyframes, a "Start Frame" and an "End Frame". Your task is to generate the frame that sits conceptually in the middle of their action.
 
-**Detailed Pose Specification for THIS FRAME:**
-\`\`\`json
-${JSON.stringify(frameDescription, null, 2)}
-\`\`\`
+**Primary Goal:** Your most important task is to follow a "delta" instruction. You must keep most of the character IDENTICAL to the "Start Frame" and ONLY modify the specific parts listed below.
 
-**Crucial Instructions:**
-- **Strict Pose Adherence:** The JSON pose described above is the absolute ground truth. Render it as accurately as possible.
-- **Character Consistency:** The character's design, art style, colors, and proportions MUST remain identical to the provided keyframes. Replicate the style with extreme fidelity.
+**Instructions for THIS FRAME:**
+
+1.  **UNCHANGED PARTS:** The following parts of the character MUST remain IDENTICAL to the "Start Frame" in every way (position, rotation, style, color):
+    **${unchangedDescription}**
+
+2.  **CHANGED PARTS:** From the "Start Frame" pose, ONLY modify the following parts. Animate them to match this new description:
+${changeDescription}
+
+**Crucial Rules:**
+- **EXTREME FIDELITY:** This is not an interpolation. It is a precise modification. Replicate the "Start Frame" exactly, then apply ONLY the specified changes. Do not get creative.
+- **Character Consistency:** The character's overall design, art style, colors, and proportions must not change between frames.
 - **Background:** ${backgroundInstruction}
 `;
+
 
                 const midFrameResponse = await ai.models.generateContent({
                     model: 'gemini-2.5-flash-image-preview',
                     contents: {
                         parts: [
-                            startFramePart,
-                            endFramePart,
+                            startFramePart, // Explicitly the "Start Frame" for reference
+                            endFramePart,   // Context for the end of the motion segment
                             { text: refinedPrompt },
                         ],
                     },
@@ -338,10 +386,7 @@ The values should be detailed string descriptions of the position and rotation o
             while (rangesToProcess.some(([start, end]) => end - start > 1)) {
                 const promises = rangesToProcess
                     .filter(([start, end]) => end - start > 1)
-                    .map(([start, end]) => {
-                        const midIndex = Math.floor((start + end) / 2);
-                        return generateSingleFrame(start, end, framePrompts[midIndex]);
-                    });
+                    .map(([start, end]) => generateSingleFrame(start, end, framePrompts));
 
                 const results = await Promise.all(promises);
                 
@@ -536,8 +581,23 @@ The values should be detailed string descriptions of the position and rotation o
                     <h2 className="text-2xl font-bold mb-4 text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-600">
                         Animation Preview
                     </h2>
-                    <div className="flex justify-center">
-                        <AnimationPlayer frames={generatedFrames} />
+                    <div className="flex flex-col items-center justify-center">
+                         <div className="flex items-center justify-center gap-3 mb-4 w-full max-w-xs">
+                            <label htmlFor="fps-slider" className="text-sm text-gray-400 whitespace-nowrap">
+                                FPS: <span className="font-bold text-gray-200 w-6 inline-block text-right">{fps}</span>
+                            </label>
+                            <input
+                                id="fps-slider"
+                                type="range"
+                                min="1"
+                                max="20"
+                                value={fps}
+                                onChange={(e) => setFps(Number(e.target.value))}
+                                className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-pink-500"
+                                aria-label="Animation speed in frames per second"
+                            />
+                        </div>
+                        <AnimationPlayer frames={generatedFrames} fps={fps} />
                     </div>
                     {isGenerationComplete && (
                          <div className="mt-6">
