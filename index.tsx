@@ -12,8 +12,7 @@ import GIFEncoder from 'gif-encoder-2';
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 const NUM_FRAMES = 10;
 
-// Helper to convert file to base64
-// FIX: Added type for file parameter and return type, and cast reader.result to string to resolve error on split.
+// Helper to convert a File object to a GoogleGenAI.Part
 const fileToGenerativePart = async (file: File): Promise<{ inlineData: { data: string; mimeType: string; } }> => {
   const base64EncodedDataPromise = new Promise<string>((resolve) => {
     const reader = new FileReader();
@@ -25,10 +24,20 @@ const fileToGenerativePart = async (file: File): Promise<{ inlineData: { data: s
   };
 };
 
+// Helper to convert a data URL string to a GoogleGenAI.Part
+const dataUrlToGenerativePart = (dataUrl: string): { inlineData: { data: string; mimeType: string; } } => {
+    const [header, data] = dataUrl.split(',');
+    const mimeType = header.match(/:(.*?);/)?.[1] ?? 'image/png';
+    return {
+        inlineData: { data, mimeType }
+    };
+};
+
+
 const App = () => {
     const [prompt, setPrompt] = useState('');
     const [initialImage, setInitialImage] = useState<{ file: File, url: string } | null>(null);
-    const [generatedFrames, setGeneratedFrames] = useState<string[]>([]);
+    const [generatedFrames, setGeneratedFrames] = useState<(string | null)[]>([]);
     const [finalGif, setFinalGif] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -48,7 +57,7 @@ const App = () => {
     };
 
     const createGif = useCallback(async (frames: string[]) => {
-        if (frames.length === 0) return;
+        if (frames.length < 2) return;
 
         const imagePromises = frames.map(frameData => {
             return new Promise<HTMLImageElement>((resolve, reject) => {
@@ -64,8 +73,8 @@ const App = () => {
 
         const encoder = new GIFEncoder(width, height);
         encoder.start();
-        encoder.setRepeat(0); // 0 for repeat, -1 for no-repeat
-        encoder.setDelay(150); // ms
+        encoder.setRepeat(0); 
+        encoder.setDelay(150); 
 
         const canvas = document.createElement('canvas');
         canvas.width = width;
@@ -73,8 +82,11 @@ const App = () => {
         const ctx = canvas.getContext('2d');
 
         for (const img of images) {
-            ctx.drawImage(img, 0, 0, width, height);
-            encoder.addFrame(ctx);
+            if (ctx) {
+                ctx.clearRect(0, 0, width, height);
+                ctx.drawImage(img, 0, 0, width, height);
+                encoder.addFrame(ctx);
+            }
         }
 
         encoder.finish();
@@ -92,50 +104,83 @@ const App = () => {
         setIsLoading(true);
         setError(null);
         setFinalGif(null);
-        setGeneratedFrames([initialImage.url]);
-        setProgress(0);
+
+        const allFramesData = new Array<string | null>(NUM_FRAMES).fill(null);
+        allFramesData[0] = initialImage.url;
+        setGeneratedFrames([...allFramesData]);
+        setProgress(1);
 
         try {
-            let currentFramePart = await fileToGenerativePart(initialImage.file);
-            const allFramesData = [initialImage.url];
+            const initialFramePart = await fileToGenerativePart(initialImage.file);
 
-            for (let i = 0; i < NUM_FRAMES - 1; i++) {
-                setProgress(i + 1);
-                const response = await ai.models.generateContent({
+            // 1. Generate the last frame
+            const lastFrameResponse = await ai.models.generateContent({
+                model: 'gemini-2.5-flash-image-preview',
+                contents: {
+                    parts: [
+                        initialFramePart,
+                        { text: `This is the first frame of an animation. The full animation is described as: "${prompt}". Generate ONLY the final frame of this animation. Ensure the background is transparent.` },
+                    ],
+                },
+                config: { responseModalities: [Modality.IMAGE, Modality.TEXT] },
+            });
+
+            const lastImagePart = lastFrameResponse.candidates?.[0]?.content.parts.find(p => 'inlineData' in p);
+            if (!lastImagePart || !('inlineData' in lastImagePart) || !lastImagePart.inlineData.data) {
+                throw new Error("API did not return the last frame.");
+            }
+            const lastFrameBase64 = `data:${lastImagePart.inlineData.mimeType};base64,${lastImagePart.inlineData.data}`;
+            allFramesData[NUM_FRAMES - 1] = lastFrameBase64;
+            setGeneratedFrames([...allFramesData]);
+            setProgress(prev => prev + 1);
+
+            // 2. Recursively generate in-between frames
+            const generateInbetweens = async (startIndex: number, endIndex: number) => {
+                if (endIndex - startIndex <= 1) return;
+
+                const midIndex = Math.floor((startIndex + endIndex) / 2);
+
+                const startFramePart = dataUrlToGenerativePart(allFramesData[startIndex]!);
+                const endFramePart = dataUrlToGenerativePart(allFramesData[endIndex]!);
+
+                const midFrameResponse = await ai.models.generateContent({
                     model: 'gemini-2.5-flash-image-preview',
                     contents: {
                         parts: [
-                            currentFramePart,
-                            { text: `${prompt} This is frame ${i + 2} of ${NUM_FRAMES}.` },
+                            startFramePart,
+                            endFramePart,
+                            { text: `These are the start and end frames of a short animation sequence. The full animation is described as: "${prompt}". Generate the single frame that should appear exactly in the middle of these two. Ensure the background is transparent.` },
                         ],
                     },
-                    config: {
-                        responseModalities: [Modality.IMAGE, Modality.TEXT],
-                    },
+                    config: { responseModalities: [Modality.IMAGE, Modality.TEXT] },
                 });
 
-                // FIX: Safely find the image part from the response and ensure it has data.
-                const imagePart = response.candidates?.[0]?.content.parts.find(p => 'inlineData' in p);
-                
-                // FIX: Added checks to ensure imagePart and its data are valid before proceeding, which also acts as a type guard.
-                if (!imagePart || !('inlineData' in imagePart) || !imagePart.inlineData.data) {
-                    throw new Error("API did not return an image for frame " + (i + 1));
+                const midImagePart = midFrameResponse.candidates?.[0]?.content.parts.find(p => 'inlineData' in p);
+                if (midImagePart && 'inlineData' in midImagePart && midImagePart.inlineData.data) {
+                    const midFrameBase64 = `data:${midImagePart.inlineData.mimeType};base64,${midImagePart.inlineData.data}`;
+                    allFramesData[midIndex] = midFrameBase64;
+                    setGeneratedFrames([...allFramesData]);
+                    setProgress(prev => prev + 1);
+                } else {
+                    console.warn(`Could not generate frame at index ${midIndex}. Skipping.`);
                 }
-                
-                // FIX: Re-construct the part object to ensure type compatibility for the next iteration.
-                currentFramePart = { 
-                    inlineData: { 
-                        data: imagePart.inlineData.data, 
-                        mimeType: imagePart.inlineData.mimeType 
-                    } 
-                };
-                const frameBase64 = `data:${imagePart.inlineData.mimeType};base64,${imagePart.inlineData.data}`;
-                allFramesData.push(frameBase64);
-                setGeneratedFrames([...allFramesData]);
-            }
 
+                await Promise.all([
+                    generateInbetweens(startIndex, midIndex),
+                    generateInbetweens(midIndex, endIndex)
+                ]);
+            };
+
+            await generateInbetweens(0, NUM_FRAMES - 1);
+
+            const finalFrames = allFramesData.filter((frame): frame is string => frame !== null);
+
+            if (finalFrames.length < 2) {
+                throw new Error("Not enough frames were generated to create a GIF.");
+            }
+            
             setProgress(NUM_FRAMES);
-            await createGif(allFramesData);
+            await createGif(finalFrames);
 
         } catch (err) {
             console.error(err);
@@ -163,7 +208,7 @@ const App = () => {
                         <div className="mt-2 flex justify-center rounded-lg border border-dashed border-gray-500 px-6 py-10 hover:border-purple-400 transition-colors">
                             <div className="text-center">
                                 {initialImage ? (
-                                    <img src={initialImage.url} alt="Uploaded preview" className="mx-auto h-32 w-32 object-cover rounded-lg" />
+                                    <img src={initialImage.url} alt="Uploaded preview" className="mx-auto h-32 w-32 object-contain rounded-lg" />
                                 ) : (
                                     <svg className="mx-auto h-12 w-12 text-gray-500" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                                         <path fillRule="evenodd" d="M1.5 6a2.25 2.25 0 012.25-2.25h16.5A2.25 2.25 0 0122.5 6v12a2.25 2.25 0 01-2.25 2.25H3.75A2.25 2.25 0 011.5 18V6zM3 16.06V18c0 .414.336.75.75.75h16.5A.75.75 0 0021 18v-1.94l-2.69-2.689a1.5 1.5 0 00-2.12 0l-.88.879.97.97a.75.75 0 11-1.06 1.06l-5.16-5.159a1.5 1.5 0 00-2.12 0L3 16.061zm10.125-7.81a1.125 1.125 0 112.25 0 1.125 1.125 0 01-2.25 0z" clipRule="evenodd" />
@@ -172,7 +217,7 @@ const App = () => {
                                 <div className="mt-4 flex text-sm leading-6 text-gray-400">
                                     <label htmlFor="file-upload" className="relative cursor-pointer rounded-md font-semibold text-purple-400 focus-within:outline-none focus-within:ring-2 focus-within:ring-purple-600 focus-within:ring-offset-2 focus-within:ring-offset-gray-900 hover:text-purple-300">
                                         <span>Upload a file</span>
-                                        <input id="file-upload" name="file-upload" type="file" className="sr-only" accept="image/*" onChange={handleImageChange} />
+                                        <input id="file-upload" name="file-upload" type="file" className="sr-only" accept="image/png, image/jpeg, image/gif, image/webp" onChange={handleImageChange} />
                                     </label>
                                     <p className="pl-1">or drag and drop</p>
                                 </div>
@@ -220,9 +265,9 @@ const App = () => {
                             </div>
                             <div className="grid grid-cols-5 gap-2 mt-4">
                                 {generatedFrames.map((frame, index) => (
-                                    <img key={index} src={frame} alt={`Frame ${index + 1}`} className="w-full aspect-square object-cover rounded-md bg-gray-700" />
-                                ))}
-                                {Array.from({ length: NUM_FRAMES - generatedFrames.length }).map((_, index) => (
+                                    frame ? 
+                                    <img key={index} src={frame} alt={`Frame ${index + 1}`} className="w-full aspect-square object-contain rounded-md bg-gray-700" />
+                                    :
                                     <div key={index} className="w-full aspect-square rounded-md bg-gray-700 animate-pulse"></div>
                                 ))}
                             </div>
@@ -230,6 +275,9 @@ const App = () => {
                     ) : (
                         <div className="text-center text-gray-500">
                             <p>Your generated GIF will appear here.</p>
+                            {generatedFrames.length > 0 && !finalGif && !isLoading && (
+                                <p className="text-sm mt-2">Previous generation attempt may have failed. Try again.</p>
+                            )}
                         </div>
                     )}
                 </div>
