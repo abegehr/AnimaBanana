@@ -20,6 +20,24 @@ const dataUrlToGenerativePart = (dataUrl: string): { inlineData: { data: string;
     };
 };
 
+// Helper to check if a canvas has a transparent background by checking corner pixels
+const checkTransparency = (canvas: HTMLCanvasElement): boolean => {
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return false;
+
+    const { width, height } = canvas;
+    if (width === 0 || height === 0) return false;
+
+    const pixelDataTL = ctx.getImageData(0, 0, 1, 1).data;
+    const pixelDataTR = ctx.getImageData(width - 1, 0, 1, 1).data;
+    const pixelDataBL = ctx.getImageData(0, height - 1, 1, 1).data;
+    const pixelDataBR = ctx.getImageData(width - 1, height - 1, 1, 1).data;
+
+    // Check if alpha channel (4th byte) is 0 for all corners
+    return pixelDataTL[3] === 0 && pixelDataTR[3] === 0 && pixelDataBL[3] === 0 && pixelDataBR[3] === 0;
+};
+
+
 const AnimationPlayer = ({ frames }: { frames: (string | null)[] }) => {
     const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
 
@@ -58,6 +76,7 @@ const AnimationPlayer = ({ frames }: { frames: (string | null)[] }) => {
 const App = () => {
     const [prompt, setPrompt] = useState('');
     const [initialImage, setInitialImage] = useState<string | null>(null);
+    const [initialImageHasTransparency, setInitialImageHasTransparency] = useState(false);
     const [generatedFrames, setGeneratedFrames] = useState<(string | null)[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -71,6 +90,7 @@ const App = () => {
             setGeneratedFrames([]);
             setError(null);
             setInitialImage(null);
+            setInitialImageHasTransparency(false);
 
             const reader = new FileReader();
             reader.onload = (event) => {
@@ -92,11 +112,12 @@ const App = () => {
                     
                     canvas.width = width;
                     canvas.height = height;
-                    const ctx = canvas.getContext('2d');
+                    const ctx = canvas.getContext('2d', { willReadFrequently: true });
                     if (ctx) {
                         ctx.drawImage(img, 0, 0, width, height);
                         const dataUrl = canvas.toDataURL('image/png');
                         setInitialImage(dataUrl);
+                        setInitialImageHasTransparency(checkTransparency(canvas));
                     } else {
                         setError("Could not process image.");
                     }
@@ -129,6 +150,11 @@ const App = () => {
 
         const allFramesData = new Array<string | null>(NUM_FRAMES).fill(null);
         setGeneratedFrames([...allFramesData]);
+        
+        const backgroundInstruction = initialImageHasTransparency
+            ? "The background MUST be perfectly transparent."
+            : "The background of the generated image MUST perfectly match the background of the provided keyframes. Do not alter the background.";
+
 
         // Helper to generate a single frame between a start and end point
         const generateSingleFrame = async (startIndex: number, endIndex: number, frameDescription: string) => {
@@ -153,8 +179,8 @@ You are an expert animator creating a single in-between frame for an animation.
 
 **Crucial Instructions for Smooth Animation:**
 - **Motion Arc:** The movement must follow a natural, smooth, curved path (an arc). Avoid linear interpolation.
-- **Character Consistency:** The character's design, colors, and proportions MUST remain identical to the provided keyframes.
-- **Background:** The background MUST be perfectly transparent.
+- **Character Consistency:** The character's design, art style, colors, and proportions MUST remain identical to the provided keyframes.
+- **Background:** ${backgroundInstruction}
 `;
 
                 const midFrameResponse = await ai.models.generateContent({
@@ -193,7 +219,7 @@ You are an expert animation planner. A user wants to create a ${NUM_FRAMES}-fram
 User's request: "${prompt}"
 ${isCyclicText}
 
-Your task is to generate a series of ${NUM_FRAMES} detailed, frame-by-frame descriptions. Each description should be a clear instruction for an image generation AI. The descriptions must create a smooth, logical, and believable progression of movement. Focus on describing the character's pose, position, and expression for each specific frame.
+Your task is to generate a series of ${NUM_FRAMES} detailed, frame-by-frame descriptions. Each description must create a smooth, logical, and believable progression of movement. Focus *only* on the character's pose, position, and expression for each specific frame. Do not describe the background or art style, as that will be preserved from the original image.
 
 Output your response as a JSON array of strings, where each string is a prompt for one frame. The array must contain exactly ${NUM_FRAMES} elements.
 `;
@@ -227,7 +253,7 @@ Output your response as a JSON array of strings, where each string is a prompt f
                 contents: {
                     parts: [
                         initialFramePart,
-                        { text: `Redraw this character image exactly as it is, matching the animation's style. Crucially, ensure it has a perfectly transparent background. This corresponds to the description: "${framePrompts[0]}"` },
+                        { text: `Redraw this character to be used as the first frame of an animation. It is CRITICAL that you replicate the character's appearance, art style, colors, and proportions from the provided image with EXTREME fidelity. Do not change the character. Follow this background instruction: "${backgroundInstruction}". This frame corresponds to the animation description: "${framePrompts[0]}"` },
                     ],
                 },
                 config: { responseModalities: [Modality.IMAGE, Modality.TEXT] },
@@ -252,7 +278,7 @@ Output your response as a JSON array of strings, where each string is a prompt f
                     contents: {
                         parts: [
                             dataUrlToGenerativePart(processedInitialImage),
-                            { text: `This is the first frame of an animation. Based on it, generate ONLY the final frame of the animation, following this specific description: "${framePrompts[NUM_FRAMES - 1]}". Ensure the background is transparent.` },
+                            { text: `This is the first frame of an animation. Based on it, generate ONLY the final frame of the animation, following this specific description: "${framePrompts[NUM_FRAMES - 1]}". Maintain the character's appearance and style perfectly. Follow this background instruction: "${backgroundInstruction}".` },
                         ],
                     },
                     config: { responseModalities: [Modality.IMAGE, Modality.TEXT] },
