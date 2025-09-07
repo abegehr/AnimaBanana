@@ -149,6 +149,151 @@ const AnimationPlayer = ({ frames, fps }: { frames: (string | null)[]; fps: numb
     );
 };
 
+const FrameCorrectorModal = ({
+    frameIndex,
+    generatedFrames,
+    initialImage,
+    backgroundInstruction,
+    onClose,
+    onRegenerate,
+}: {
+    frameIndex: number;
+    generatedFrames: (string | null)[];
+    initialImage: string;
+    backgroundInstruction: string;
+    onClose: () => void;
+    onRegenerate: (frameIndex: number, newFrame: string) => void;
+}) => {
+    const [correctionPrompt, setCorrectionPrompt] = useState('');
+    const [isRegenerating, setIsRegenerating] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    const prevFrame = frameIndex > 0 ? generatedFrames[frameIndex - 1] : null;
+    const currentFrame = generatedFrames[frameIndex];
+    const nextFrame = frameIndex < NUM_FRAMES - 1 ? generatedFrames[frameIndex + 1] : null;
+
+    const handleRegenerateClick = async () => {
+        if (!correctionPrompt || !currentFrame) return;
+        setIsRegenerating(true);
+        setError(null);
+        try {
+            // FIX: Explicitly type `parts` to allow both image and text objects, preventing a type inference error.
+            const parts: ({ inlineData: { data: string; mimeType: string; } } | { text: string })[] = [
+                dataUrlToGenerativePart(initialImage), // Style Lock
+            ];
+            
+            let contextPrompt = '';
+
+            if (prevFrame) {
+                parts.push(dataUrlToGenerativePart(prevFrame));
+                contextPrompt += '2. **Previous Frame:** The frame that comes just before the one you are creating.\n';
+            }
+            parts.push(dataUrlToGenerativePart(currentFrame));
+            contextPrompt += `${parts.length}. **Frame to Correct:** This is the current, flawed frame that you need to fix.\n`;
+
+            if (nextFrame) {
+                parts.push(dataUrlToGenerativePart(nextFrame));
+                contextPrompt += `${parts.length}. **Next Frame:** The frame that comes just after the one you are creating.\n`;
+            }
+
+
+            const refinedPrompt = `You are an expert animator performing a correction on a single animation frame.
+
+**REFERENCE IMAGES:**
+1. **Original Image (Style Lock):** The ground truth for character style, color, and proportions. You MUST match this.
+${contextPrompt}
+
+**USER'S CORRECTION REQUEST:**
+"${correctionPrompt}"
+
+**YOUR TASK:**
+Redraw the "Frame to Correct" to incorporate the user's request. The new frame MUST:
+- Match the style of the "Original Image" perfectly.
+- Create a smooth, believable transition between the "Previous Frame" and "Next Frame" (if they are provided).
+- Maintain the specified background: ${backgroundInstruction}
+
+Focus on applying the user's correction while preserving the flow of the animation.
+`;
+            parts.push({ text: refinedPrompt });
+
+            const response = await ai.models.generateContent({
+                model: 'gemini-2.5-flash-image-preview',
+                contents: { parts },
+                config: { responseModalities: [Modality.IMAGE, Modality.TEXT] },
+            });
+
+            const newImagePart = response.candidates?.[0]?.content.parts.find(p => 'inlineData' in p);
+            if (newImagePart && 'inlineData' in newImagePart && newImagePart.inlineData.data) {
+                const newFrameData = `data:${newImagePart.inlineData.mimeType};base64,${newImagePart.inlineData.data}`;
+                onRegenerate(frameIndex, newFrameData);
+                onClose();
+            } else {
+                throw new Error('AI did not return a valid image. Please try again.');
+            }
+        } catch (err) {
+            console.error('Frame regeneration failed:', err);
+            setError(err instanceof Error ? err.message : 'An unknown error occurred.');
+        } finally {
+            setIsRegenerating(false);
+        }
+    };
+
+    if (!currentFrame) return null;
+
+    return (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" aria-modal="true" role="dialog">
+            <div className="bg-gray-800 rounded-2xl shadow-xl w-full max-w-4xl max-h-full overflow-y-auto p-6">
+                <div className="flex justify-between items-center mb-4">
+                    <h2 className="text-2xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-600">
+                        Correct Frame {frameIndex + 1}
+                    </h2>
+                    <button onClick={onClose} className="text-gray-400 hover:text-white">&times;</button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                    <div className="flex flex-col items-center">
+                        <h3 className="text-lg font-semibold text-gray-400 mb-2">Previous Frame</h3>
+                        {prevFrame ? <img src={prevFrame} className="rounded-lg w-full aspect-square object-contain bg-black/20" /> : <div className="text-gray-500 italic">N/A</div>}
+                    </div>
+                     <div className="flex flex-col items-center border-2 border-pink-500 p-2 rounded-lg">
+                        <h3 className="text-lg font-semibold text-pink-400 mb-2">Frame to Correct</h3>
+                        <img src={currentFrame} className="rounded-lg w-full aspect-square object-contain bg-black/20" />
+                    </div>
+                    <div className="flex flex-col items-center">
+                        <h3 className="text-lg font-semibold text-gray-400 mb-2">Next Frame</h3>
+                        {nextFrame ? <img src={nextFrame} className="rounded-lg w-full aspect-square object-contain bg-black/20" /> : <div className="text-gray-500 italic">N/A</div>}
+                    </div>
+                </div>
+
+                <div>
+                    <label htmlFor="correction-prompt" className="block text-lg font-medium text-gray-300 mb-2">Describe Correction</label>
+                    <textarea
+                        id="correction-prompt"
+                        rows={2}
+                        className="block w-full rounded-md border-0 bg-white/5 py-2 px-3 text-white shadow-sm ring-1 ring-inset ring-gray-600 focus:ring-2 focus:ring-inset focus:ring-purple-500 sm:text-sm sm:leading-6 placeholder:text-gray-500"
+                        placeholder="e.g., make the hand fully open, the sunglasses are crooked"
+                        value={correctionPrompt}
+                        onChange={(e) => setCorrectionPrompt(e.target.value)}
+                    />
+                </div>
+
+                {error && <p className="text-red-400 text-sm mt-2">{error}</p>}
+
+                <div className="mt-6 flex justify-end gap-4">
+                    <button onClick={onClose} className="rounded-md bg-gray-600 px-4 py-2 text-sm font-semibold text-white hover:bg-gray-500">Cancel</button>
+                    <button
+                        onClick={handleRegenerateClick}
+                        disabled={isRegenerating || !correctionPrompt}
+                        className="rounded-md bg-purple-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-purple-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        {isRegenerating ? 'Regenerating...' : 'Re-generate Frame'}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 
 const App = () => {
     const [prompt, setPrompt] = useState('');
@@ -162,6 +307,7 @@ const App = () => {
     const [loadingMessage, setLoadingMessage] = useState('');
     const [estimatedCost, setEstimatedCost] = useState(0);
     const [fps, setFps] = useState(5);
+    const [editingFrameIndex, setEditingFrameIndex] = useState<number | null>(null);
 
     const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -170,6 +316,7 @@ const App = () => {
             setError(null);
             setInitialImage(null);
             setInitialImageHasTransparency(false);
+            setEditingFrameIndex(null);
 
             const reader = new FileReader();
             reader.onload = (event) => {
@@ -508,6 +655,16 @@ The values should be detailed string descriptions of the position and rotation o
         }
     };
     
+    const handleFrameRegenerate = (frameIndex: number, newFrame: string) => {
+        setGeneratedFrames(prevFrames => {
+            const newFrames = [...prevFrames];
+            newFrames[frameIndex] = newFrame;
+            return newFrames;
+        });
+        setEstimatedCost(prev => prev + IMAGE_GENERATION_PRICE_PER_IMAGE);
+    };
+
+
     const isGenerationComplete = !isLoading && generatedFrames.every(f => f !== null);
     const hasGeneratedFrames = generatedFrames.some(f => f !== null);
     const totalSteps = NUM_FRAMES + 1;
@@ -518,6 +675,10 @@ The values should be detailed string descriptions of the position and rotation o
         if (progress < 1) return 'Generating animation plan...';
         return `${loadingMessage} ${framesDone}/${NUM_FRAMES}...`;
     };
+
+    const backgroundInstruction = initialImageHasTransparency
+        ? "The background MUST be perfectly transparent."
+        : "The background of the generated image MUST perfectly match the background of the provided keyframes. Do not alter the background.";
 
     return (
         <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center p-4 sm:p-6 md:p-10">
@@ -606,7 +767,13 @@ The values should be detailed string descriptions of the position and rotation o
                             <div className="grid grid-cols-3 gap-2 mt-4">
                                 {generatedFrames.map((frame, index) => (
                                     frame ? 
-                                    <img key={index} src={frame} alt={`Frame ${index + 1}`} className="w-full aspect-square object-contain rounded-md bg-gray-700" />
+                                    <img 
+                                        key={index} 
+                                        src={frame} 
+                                        alt={`Frame ${index + 1}`} 
+                                        className="w-full aspect-square object-contain rounded-md bg-gray-700 cursor-pointer hover:opacity-80 transition-opacity"
+                                        onClick={() => isGenerationComplete && setEditingFrameIndex(index)}
+                                    />
                                     :
                                     <div key={index} className="w-full aspect-square rounded-md bg-gray-700 animate-pulse"></div>
                                 ))}
@@ -654,6 +821,17 @@ The values should be detailed string descriptions of the position and rotation o
                         </div>
                     )}
                 </section>
+            )}
+            
+            {editingFrameIndex !== null && initialImage && (
+                <FrameCorrectorModal 
+                    frameIndex={editingFrameIndex}
+                    generatedFrames={generatedFrames}
+                    initialImage={initialImage}
+                    backgroundInstruction={backgroundInstruction}
+                    onClose={() => setEditingFrameIndex(null)}
+                    onRegenerate={handleFrameRegenerate}
+                />
             )}
 
         </div>
