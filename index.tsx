@@ -6,7 +6,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-import { GoogleGenAI, Modality } from '@google/genai';
+import { GoogleGenAI, Modality, Type } from '@google/genai';
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 const NUM_FRAMES = 9;
@@ -63,6 +63,7 @@ const App = () => {
     const [error, setError] = useState<string | null>(null);
     const [progress, setProgress] = useState(0);
     const [isCyclic, setIsCyclic] = useState(false);
+    const [loadingMessage, setLoadingMessage] = useState('');
 
     const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -123,12 +124,14 @@ const App = () => {
         setIsLoading(true);
         setError(null);
         setProgress(0);
+        
+        const totalSteps = NUM_FRAMES + 1; // 1 for planning, NUM_FRAMES for image generation
 
         const allFramesData = new Array<string | null>(NUM_FRAMES).fill(null);
         setGeneratedFrames([...allFramesData]);
 
         // Helper to generate a single frame between a start and end point
-        const generateSingleFrame = async (startIndex: number, endIndex: number) => {
+        const generateSingleFrame = async (startIndex: number, endIndex: number, frameDescription: string) => {
             const midIndex = Math.floor((startIndex + endIndex) / 2);
 
             if (!allFramesData[startIndex] || !allFramesData[endIndex]) {
@@ -139,29 +142,19 @@ const App = () => {
             try {
                 const startFramePart = dataUrlToGenerativePart(allFramesData[startIndex]!);
                 const endFramePart = dataUrlToGenerativePart(allFramesData[endIndex]!);
-
-                // Calculate the temporal position of the frames for a more detailed prompt
-                const totalIntervals = NUM_FRAMES - 1;
-                const startPercentage = Math.round((startIndex / totalIntervals) * 100);
-                const endPercentage = Math.round((endIndex / totalIntervals) * 100);
-                const targetPercentage = Math.round((midIndex / totalIntervals) * 100);
-
+                
                 const refinedPrompt = `
-You are an expert animator creating a single frame for an animation sequence.
+You are an expert animator creating a single in-between frame for an animation.
 
-**Overall Animation Goal:** "${prompt}"
+**Context:** You are given the start frame and end frame for a small segment of a larger animation.
+**Your Task:** Generate the single frame that should appear exactly in the middle of the two provided frames, based on the specific description below.
 
-**Provided Frames:** You are given two keyframes:
-1. The frame at the ${startPercentage}% mark of the animation.
-2. The frame at the ${endPercentage}% mark of the animation.
-
-**Your Task:** Generate the single, high-quality frame that should appear precisely at the ${targetPercentage}% mark, exactly in the middle of the two provided frames.
+**Frame-Specific Description:** "${frameDescription}"
 
 **Crucial Instructions for Smooth Animation:**
-- **Motion Arc:** The character's movement must follow a natural, smooth, curved path (an arc) between the start and end poses. Avoid linear, robotic-looking interpolation.
-- **Character Consistency:** The character's design, colors, proportions, and style MUST remain identical to the provided keyframes. Do not add, remove, or alter any character details.
+- **Motion Arc:** The movement must follow a natural, smooth, curved path (an arc). Avoid linear interpolation.
+- **Character Consistency:** The character's design, colors, and proportions MUST remain identical to the provided keyframes.
 - **Background:** The background MUST be perfectly transparent.
-- **Interpolation Logic:** This frame is a critical in-between. It should logically and fluidly connect the start and end frames, showing a believable transition of the character's pose, position, and any moving parts.
 `;
 
                 const midFrameResponse = await ai.models.generateContent({
@@ -192,14 +185,49 @@ You are an expert animator creating a single frame for an animation sequence.
         };
 
         try {
-            // 1. Generate a "clean" first frame from the user upload for consistency.
+            // 1. Generate a full script of frame-by-frame prompts
+            setLoadingMessage('Generating animation plan...');
+            const isCyclicText = isCyclic ? "The animation should loop seamlessly, so the last frame should lead smoothly back into the first." : "The animation has a distinct start and end.";
+            const plannerPrompt = `
+You are an expert animation planner. A user wants to create a ${NUM_FRAMES}-frame animation.
+User's request: "${prompt}"
+${isCyclicText}
+
+Your task is to generate a series of ${NUM_FRAMES} detailed, frame-by-frame descriptions. Each description should be a clear instruction for an image generation AI. The descriptions must create a smooth, logical, and believable progression of movement. Focus on describing the character's pose, position, and expression for each specific frame.
+
+Output your response as a JSON array of strings, where each string is a prompt for one frame. The array must contain exactly ${NUM_FRAMES} elements.
+`;
+            const promptGenResponse = await ai.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents: plannerPrompt,
+                config: {
+                    responseMimeType: "application/json",
+                    responseSchema: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                    },
+                },
+            });
+
+            const generatedPrompts = JSON.parse(promptGenResponse.text);
+
+            if (!Array.isArray(generatedPrompts) || generatedPrompts.length !== NUM_FRAMES || !generatedPrompts.every(p => typeof p === 'string')) {
+                throw new Error('The AI failed to generate a valid animation plan. Please try a different prompt.');
+            }
+            const framePrompts = generatedPrompts as string[];
+            setProgress(1);
+            setLoadingMessage('Generating frames...');
+
+
+            // 2. Generate frames based on the script
+            // 2a. Generate a "clean" first frame from the user upload for consistency.
             const initialFramePart = dataUrlToGenerativePart(initialImage);
             const firstFrameResponse = await ai.models.generateContent({
                 model: 'gemini-2.5-flash-image-preview',
                 contents: {
                     parts: [
                         initialFramePart,
-                        { text: `Redraw this character image exactly as it is. Crucially, ensure it has a perfectly transparent background. This will be the starting frame of an animation.` },
+                        { text: `Redraw this character image exactly as it is, matching the animation's style. Crucially, ensure it has a perfectly transparent background. This corresponds to the description: "${framePrompts[0]}"` },
                     ],
                 },
                 config: { responseModalities: [Modality.IMAGE, Modality.TEXT] },
@@ -211,20 +239,20 @@ You are an expert animator creating a single frame for an animation sequence.
             const processedInitialImage = `data:${firstImagePart.inlineData.mimeType};base64,${firstImagePart.inlineData.data}`;
             allFramesData[0] = processedInitialImage;
             setGeneratedFrames([...allFramesData]);
-            setProgress(1);
+            setProgress(prev => prev + 1);
 
 
-            // 2. Determine and generate the last frame
+            // 2b. Determine and generate the last frame
             if (isCyclic) {
                 allFramesData[NUM_FRAMES - 1] = processedInitialImage;
-                setProgress(prev => prev + 1); // Account for this step in progress
+                setProgress(prev => prev + 1);
             } else {
                 const lastFrameResponse = await ai.models.generateContent({
                     model: 'gemini-2.5-flash-image-preview',
                     contents: {
                         parts: [
                             dataUrlToGenerativePart(processedInitialImage),
-                            { text: `This is the first frame of an animation. The full animation is described as: "${prompt}". Generate ONLY the final frame of this animation. Ensure the background is transparent.` },
+                            { text: `This is the first frame of an animation. Based on it, generate ONLY the final frame of the animation, following this specific description: "${framePrompts[NUM_FRAMES - 1]}". Ensure the background is transparent.` },
                         ],
                     },
                     config: { responseModalities: [Modality.IMAGE, Modality.TEXT] },
@@ -241,12 +269,15 @@ You are an expert animator creating a single frame for an animation sequence.
             setGeneratedFrames([...allFramesData]);
 
 
-            // 3. Iteratively generate in-between frames level by level
+            // 2c. Iteratively generate in-between frames level by level
             let rangesToProcess: [number, number][] = [[0, NUM_FRAMES - 1]];
             while (rangesToProcess.some(([start, end]) => end - start > 1)) {
                 const promises = rangesToProcess
                     .filter(([start, end]) => end - start > 1)
-                    .map(([start, end]) => generateSingleFrame(start, end));
+                    .map(([start, end]) => {
+                        const midIndex = Math.floor((start + end) / 2);
+                        return generateSingleFrame(start, end, framePrompts[midIndex]);
+                    });
 
                 const results = await Promise.all(promises);
                 
@@ -273,7 +304,7 @@ You are an expert animator creating a single frame for an animation sequence.
                 throw new Error("Not enough frames were generated to create an animation.");
             }
             
-            setProgress(NUM_FRAMES);
+            setProgress(totalSteps);
 
         } catch (err) {
             console.error(err);
@@ -281,11 +312,20 @@ You are an expert animator creating a single frame for an animation sequence.
             setError("Failed to generate animation. " + message);
         } finally {
             setIsLoading(false);
+            setLoadingMessage('');
         }
     };
     
     const isGenerationComplete = !isLoading && generatedFrames.some(f => f !== null);
     const hasGeneratedFrames = generatedFrames.some(f => f !== null);
+    const totalSteps = NUM_FRAMES + 1;
+
+    const getLoadingText = () => {
+        if (!isLoading) return 'Generate Frames';
+        const framesDone = Math.max(0, progress - 1);
+        if (progress < 1) return 'Generating animation plan...';
+        return `${loadingMessage} ${framesDone}/${NUM_FRAMES}...`;
+    };
 
     return (
         <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center p-4 sm:p-6 md:p-10">
@@ -349,7 +389,7 @@ You are an expert animator creating a single frame for an animation sequence.
                         disabled={isLoading || !initialImage || !prompt}
                         className="w-full rounded-md bg-purple-600 px-4 py-3 text-base font-semibold text-white shadow-sm hover:bg-purple-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-purple-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
                     >
-                        {isLoading ? `Generating Frame ${progress}/${NUM_FRAMES}...` : 'Generate Frames'}
+                        {getLoadingText()}
                     </button>
                     {error && <p className="text-red-400 text-sm mt-2">{error}</p>}
                 </div>
@@ -361,7 +401,7 @@ You are an expert animator creating a single frame for an animation sequence.
                             {isLoading && (
                                 <div className="relative pt-1">
                                     <div className="overflow-hidden h-4 mb-4 text-xs flex rounded-full bg-purple-900">
-                                        <div style={{ width: `${(progress / NUM_FRAMES) * 100}%` }} className="shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center bg-gradient-to-r from-purple-500 to-pink-500 transition-all duration-300"></div>
+                                        <div style={{ width: `${(progress / totalSteps) * 100}%` }} className="shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center bg-gradient-to-r from-purple-500 to-pink-500 transition-all duration-300"></div>
                                     </div>
                                 </div>
                             )}
