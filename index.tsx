@@ -4,10 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { GoogleGenAI, Modality } from '@google/genai';
-import GIFEncoder from 'gif-encoder-2';
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 const NUM_FRAMES = 9;
@@ -21,12 +20,37 @@ const dataUrlToGenerativePart = (dataUrl: string): { inlineData: { data: string;
     };
 };
 
+const AnimationPlayer = ({ frames }: { frames: string[] }) => {
+    const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
+
+    useEffect(() => {
+        if (!frames || frames.length === 0) return;
+
+        const interval = setInterval(() => {
+            setCurrentFrameIndex((prevIndex) => (prevIndex + 1) % frames.length);
+        }, 100); // 100ms for 10 FPS
+
+        return () => clearInterval(interval);
+    }, [frames]);
+
+    if (!frames || frames.length === 0) {
+        return null;
+    }
+
+    return (
+        <img
+            src={frames[currentFrameIndex]}
+            alt="Live animation"
+            className="rounded-lg max-w-full h-auto max-h-80 shadow-lg"
+        />
+    );
+};
+
 
 const App = () => {
     const [prompt, setPrompt] = useState('');
     const [initialImage, setInitialImage] = useState<string | null>(null);
     const [generatedFrames, setGeneratedFrames] = useState<(string | null)[]>([]);
-    const [finalGif, setFinalGif] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [progress, setProgress] = useState(0);
@@ -35,7 +59,6 @@ const App = () => {
     const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (file) {
-            setFinalGif(null);
             setGeneratedFrames([]);
             setError(null);
             setInitialImage(null);
@@ -83,75 +106,6 @@ const App = () => {
         }
     };
 
-    const createGif = useCallback(async (frames: string[]) => {
-        if (frames.length < 2) {
-            setError("Not enough frames to create a GIF.");
-            return;
-        }
-    
-        try {
-            // Load all frame images
-            const imagePromises = frames.map(frameData => {
-                return new Promise<HTMLImageElement>((resolve, reject) => {
-                    const img = new Image();
-                    img.onload = () => resolve(img);
-                    img.onerror = (err) => reject(new Error(`Failed to load frame: ${err}`));
-                    img.src = frameData;
-                });
-            });
-    
-            const images = await Promise.all(imagePromises);
-            const { width, height } = images[0];
-    
-            // Use a temporary canvas to draw frames
-            const canvas = document.createElement('canvas');
-            canvas.width = width;
-            canvas.height = height;
-            const ctx = canvas.getContext('2d');
-    
-            if (!ctx) {
-                throw new Error("Failed to create canvas context for GIF generation.");
-            }
-    
-            // Initialize GIF encoder with Octree quantizer for better quality with cartoons
-            const encoder = new GIFEncoder(width, height, 'octree');
-            encoder.start();
-            encoder.setRepeat(0);      // 0 for repeat forever
-            encoder.setDelay(100);     // 100ms delay for 10 FPS
-            encoder.setQuality(10);    // 10 is best quality
-            
-            // Use a "magic" color (magenta) for transparency.
-            // We'll fill the background with this, draw the image on top,
-            // and then tell the encoder to treat this color as transparent.
-            const transparentColor = '#ff00ff';
-            const transparentColorHex = 0xff00ff;
-            encoder.setTransparent(transparentColorHex);
-    
-            // Process each frame
-            for (const img of images) {
-                // Fill background with the magic transparent color
-                ctx.fillStyle = transparentColor;
-                ctx.fillRect(0, 0, width, height);
-    
-                // Draw the actual frame image (with its own transparency) on top
-                ctx.drawImage(img, 0, 0, width, height);
-    
-                // Add the composed frame to the GIF
-                encoder.addFrame(ctx);
-            }
-    
-            // Finalize GIF
-            encoder.finish();
-            const buffer = encoder.out.getData();
-            const blob = new Blob([buffer], { type: 'image/gif' });
-            setFinalGif(URL.createObjectURL(blob));
-        } catch (err) {
-            console.error("GIF creation failed:", err);
-            const message = err instanceof Error ? err.message : "An unknown error occurred during GIF creation.";
-            setError(message);
-        }
-    }, []);
-
     const generateAnimation = async () => {
         if (!prompt || !initialImage) {
             setError("Please provide both an image and a prompt.");
@@ -160,7 +114,6 @@ const App = () => {
 
         setIsLoading(true);
         setError(null);
-        setFinalGif(null);
         setProgress(0);
 
         const allFramesData = new Array<string | null>(NUM_FRAMES).fill(null);
@@ -285,11 +238,10 @@ const App = () => {
 
             const finalFrames = allFramesData.filter((frame): frame is string => frame !== null);
             if (finalFrames.length < 2) {
-                throw new Error("Not enough frames were generated to create a GIF.");
+                throw new Error("Not enough frames were generated to create an animation.");
             }
             
             setProgress(NUM_FRAMES);
-            await createGif(finalFrames);
 
         } catch (err) {
             console.error(err);
@@ -299,12 +251,14 @@ const App = () => {
             setIsLoading(false);
         }
     };
+    
+    const isGenerationComplete = !isLoading && generatedFrames.some(f => f !== null);
 
     return (
         <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center p-4 sm:p-6 md:p-10">
             <header className="w-full max-w-5xl text-center mb-8">
                 <h1 className="text-4xl sm:text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-600">
-                    Cartoon GIF Animator
+                    AnimaBanana
                 </h1>
                 <p className="text-gray-400 mt-2">Bring your characters to life with AI</p>
             </header>
@@ -362,28 +316,23 @@ const App = () => {
                         disabled={isLoading || !initialImage || !prompt}
                         className="w-full rounded-md bg-purple-600 px-4 py-3 text-base font-semibold text-white shadow-sm hover:bg-purple-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-purple-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
                     >
-                        {isLoading ? `Generating Frame ${progress}/${NUM_FRAMES}...` : 'Generate GIF'}
+                        {isLoading ? `Generating Frame ${progress}/${NUM_FRAMES}...` : 'Generate Frames'}
                     </button>
                     {error && <p className="text-red-400 text-sm mt-2">{error}</p>}
                 </div>
                 
                 {/* Output */}
                 <div className="flex flex-col items-center justify-center bg-black/20 rounded-lg p-4 min-h-[300px]">
-                    {finalGif ? (
-                        <div className="text-center">
-                            <h3 className="text-xl font-semibold mb-4">Your Animated GIF!</h3>
-                            <img src={finalGif} alt="Generated animation" className="rounded-lg max-w-full h-auto max-h-80 shadow-lg" />
-                            <a href={finalGif} download="animation.gif" className="mt-6 inline-block rounded-md bg-green-600 px-4 py-2 text-base font-semibold text-white shadow-sm hover:bg-green-500">
-                                Download GIF
-                            </a>
-                        </div>
-                    ) : isLoading ? (
+                    {isLoading || isGenerationComplete ? (
                         <div className="w-full">
-                            <div className="relative pt-1">
-                                <div className="overflow-hidden h-4 mb-4 text-xs flex rounded-full bg-purple-900">
-                                    <div style={{ width: `${(progress / NUM_FRAMES) * 100}%` }} className="shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center bg-gradient-to-r from-purple-500 to-pink-500 transition-all duration-300"></div>
+                            {isLoading && (
+                                <div className="relative pt-1">
+                                    <div className="overflow-hidden h-4 mb-4 text-xs flex rounded-full bg-purple-900">
+                                        <div style={{ width: `${(progress / NUM_FRAMES) * 100}%` }} className="shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center bg-gradient-to-r from-purple-500 to-pink-500 transition-all duration-300"></div>
+                                    </div>
                                 </div>
-                            </div>
+                            )}
+                            {isGenerationComplete && <h3 className="text-xl font-semibold mb-4 text-center">Generated Frames</h3>}
                             <div className="grid grid-cols-3 gap-2 mt-4">
                                 {generatedFrames.map((frame, index) => (
                                     frame ? 
@@ -395,14 +344,23 @@ const App = () => {
                         </div>
                     ) : (
                         <div className="text-center text-gray-500">
-                            <p>Your generated GIF will appear here.</p>
-                            {generatedFrames.length > 0 && !finalGif && !isLoading && (
-                                <p className="text-sm mt-2">Previous generation attempt may have failed. Try again.</p>
-                            )}
+                            <p>Your generated frames will appear here.</p>
                         </div>
                     )}
                 </div>
             </main>
+
+            {isGenerationComplete && (
+                 <section className="w-full max-w-5xl mt-8 bg-gray-800 p-8 rounded-2xl shadow-2xl text-center">
+                    <h2 className="text-2xl font-bold mb-4 text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-600">
+                        Animation Preview
+                    </h2>
+                    <div className="flex justify-center">
+                        <AnimationPlayer frames={generatedFrames.filter((f): f is string => f !== null)} />
+                    </div>
+                </section>
+            )}
+
         </div>
     );
 };
