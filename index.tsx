@@ -7,7 +7,7 @@
 import React, { useState, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 import { GoogleGenAI, Modality } from '@google/genai';
-import GIF from 'gif-encoder-2';
+import GIFEncoder from 'gif-encoder-2';
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 const NUM_FRAMES = 10;
@@ -62,7 +62,7 @@ const App = () => {
         const images = await Promise.all(imagePromises);
         const { width, height } = images[0];
 
-        const encoder = GIF.createEncoder(width, height);
+        const encoder = new GIFEncoder(width, height);
         encoder.start();
         encoder.setRepeat(0); // 0 for repeat, -1 for no-repeat
         encoder.setDelay(150); // ms
