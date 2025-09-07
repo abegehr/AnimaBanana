@@ -70,16 +70,18 @@ const diffPoses = (poseA: Record<string, string>, poseB: Record<string, string>)
 
 const AnimationPlayer = ({ frames, fps }: { frames: (string | null)[]; fps: number; }) => {
     const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
+    const [isPlaying, setIsPlaying] = useState(true);
 
     useEffect(() => {
+        if (!isPlaying) return;
+
         const intervalDuration = 1000 / fps;
-        // Set up a timer that cycles through all potential frame indices
         const interval = setInterval(() => {
             setCurrentFrameIndex((prevIndex) => (prevIndex + 1) % NUM_FRAMES);
         }, intervalDuration);
 
         return () => clearInterval(interval);
-    }, [fps]); // Rerun effect if fps changes
+    }, [fps, isPlaying]);
 
     // For the current index, find the last available frame by looking backwards
     let imageToDisplay: string | null = null;
@@ -98,6 +100,15 @@ const AnimationPlayer = ({ frames, fps }: { frames: (string | null)[]; fps: numb
             }
         }
     }
+    
+    const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        setIsPlaying(false); // Pause on scrub
+        setCurrentFrameIndex(Number(e.target.value));
+    };
+
+    const togglePlayPause = () => {
+        setIsPlaying(!isPlaying);
+    };
 
 
     if (!imageToDisplay) {
@@ -105,11 +116,36 @@ const AnimationPlayer = ({ frames, fps }: { frames: (string | null)[]; fps: numb
     }
 
     return (
-        <img
-            src={imageToDisplay}
-            alt="Live animation"
-            className="rounded-lg max-w-full h-auto max-h-80 shadow-lg"
-        />
+        <div className="w-full flex flex-col items-center gap-4">
+            <img
+                src={imageToDisplay}
+                alt="Live animation"
+                className="rounded-lg max-w-full h-auto max-h-80 shadow-lg"
+            />
+             <div className="w-full max-w-sm flex items-center gap-3">
+                <button
+                    onClick={togglePlayPause}
+                    className="p-2 rounded-full bg-gray-700 hover:bg-gray-600 text-white focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-800 focus:ring-pink-500"
+                    aria-label={isPlaying ? 'Pause animation' : 'Play animation'}
+                >
+                    {isPlaying ? (
+                        <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM7 8a1 1 0 00-1 1v2a1 1 0 102 0V9a1 1 0 00-1-1zm5 0a1 1 0 00-1 1v2a1 1 0 102 0V9a1 1 0 00-1-1z" clipRule="evenodd"></path></svg>
+                    ) : (
+                        <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd"></path></svg>
+                    )}
+                </button>
+                 <input
+                    type="range"
+                    min="0"
+                    max={NUM_FRAMES - 1}
+                    value={currentFrameIndex}
+                    onChange={handleSliderChange}
+                    className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-pink-500"
+                    aria-label="Frame scrubber"
+                />
+                <span className="text-sm font-mono w-16 text-left text-gray-400">{currentFrameIndex + 1} / {NUM_FRAMES}</span>
+            </div>
+        </div>
     );
 };
 
