@@ -12,18 +12,6 @@ import GIFEncoder from 'gif-encoder-2';
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 const NUM_FRAMES = 10;
 
-// Helper to convert a File object to a GoogleGenAI.Part
-const fileToGenerativePart = async (file: File): Promise<{ inlineData: { data: string; mimeType: string; } }> => {
-  const base64EncodedDataPromise = new Promise<string>((resolve) => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve((reader.result as string).split(',')[1]);
-    reader.readAsDataURL(file);
-  });
-  return {
-    inlineData: { data: await base64EncodedDataPromise, mimeType: file.type },
-  };
-};
-
 // Helper to convert a data URL string to a GoogleGenAI.Part
 const dataUrlToGenerativePart = (dataUrl: string): { inlineData: { data: string; mimeType: string; } } => {
     const [header, data] = dataUrl.split(',');
@@ -36,7 +24,7 @@ const dataUrlToGenerativePart = (dataUrl: string): { inlineData: { data: string;
 
 const App = () => {
     const [prompt, setPrompt] = useState('');
-    const [initialImage, setInitialImage] = useState<{ file: File, url: string } | null>(null);
+    const [initialImage, setInitialImage] = useState<string | null>(null);
     const [generatedFrames, setGeneratedFrames] = useState<(string | null)[]>([]);
     const [finalGif, setFinalGif] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(false);
@@ -49,10 +37,48 @@ const App = () => {
             setFinalGif(null);
             setGeneratedFrames([]);
             setError(null);
-            setInitialImage({
-                file: file,
-                url: URL.createObjectURL(file),
-            });
+            setInitialImage(null);
+
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                const img = new Image();
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    const MAX_DIMENSION = 512;
+                    let { width, height } = img;
+
+                    if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+                        if (width > height) {
+                            height = Math.round(height * (MAX_DIMENSION / width));
+                            width = MAX_DIMENSION;
+                        } else {
+                            width = Math.round(width * (MAX_DIMENSION / height));
+                            height = MAX_DIMENSION;
+                        }
+                    }
+                    
+                    canvas.width = width;
+                    canvas.height = height;
+                    const ctx = canvas.getContext('2d');
+                    if (ctx) {
+                        ctx.drawImage(img, 0, 0, width, height);
+                        const dataUrl = canvas.toDataURL('image/png');
+                        setInitialImage(dataUrl);
+                    } else {
+                        setError("Could not process image.");
+                    }
+                };
+                img.onerror = () => {
+                    setError("Could not load the selected image file.");
+                };
+                if (event.target?.result) {
+                    img.src = event.target.result as string;
+                }
+            };
+            reader.onerror = () => {
+                setError("Could not read the selected file.");
+            };
+            reader.readAsDataURL(file);
         }
     };
 
@@ -106,12 +132,12 @@ const App = () => {
         setFinalGif(null);
 
         const allFramesData = new Array<string | null>(NUM_FRAMES).fill(null);
-        allFramesData[0] = initialImage.url;
+        allFramesData[0] = initialImage;
         setGeneratedFrames([...allFramesData]);
         setProgress(1);
 
         try {
-            const initialFramePart = await fileToGenerativePart(initialImage.file);
+            const initialFramePart = dataUrlToGenerativePart(initialImage);
 
             // 1. Generate the last frame
             const lastFrameResponse = await ai.models.generateContent({
@@ -208,7 +234,7 @@ const App = () => {
                         <div className="mt-2 flex justify-center rounded-lg border border-dashed border-gray-500 px-6 py-10 hover:border-purple-400 transition-colors">
                             <div className="text-center">
                                 {initialImage ? (
-                                    <img src={initialImage.url} alt="Uploaded preview" className="mx-auto h-32 w-32 object-contain rounded-lg" />
+                                    <img src={initialImage} alt="Uploaded preview" className="mx-auto h-32 w-32 object-contain rounded-lg" />
                                 ) : (
                                     <svg className="mx-auto h-12 w-12 text-gray-500" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                                         <path fillRule="evenodd" d="M1.5 6a2.25 2.25 0 012.25-2.25h16.5A2.25 2.25 0 0122.5 6v12a2.25 2.25 0 01-2.25 2.25H3.75A2.25 2.25 0 011.5 18V6zM3 16.06V18c0 .414.336.75.75.75h16.5A.75.75 0 0021 18v-1.94l-2.69-2.689a1.5 1.5 0 00-2.12 0l-.88.879.97.97a.75.75 0 11-1.06 1.06l-5.16-5.159a1.5 1.5 0 00-2.12 0L3 16.061zm10.125-7.81a1.125 1.125 0 112.25 0 1.125 1.125 0 01-2.25 0z" clipRule="evenodd" />
