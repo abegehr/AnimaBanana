@@ -140,13 +140,37 @@ const App = () => {
                 const startFramePart = dataUrlToGenerativePart(allFramesData[startIndex]!);
                 const endFramePart = dataUrlToGenerativePart(allFramesData[endIndex]!);
 
+                // Calculate the temporal position of the frames for a more detailed prompt
+                const totalIntervals = NUM_FRAMES - 1;
+                const startPercentage = Math.round((startIndex / totalIntervals) * 100);
+                const endPercentage = Math.round((endIndex / totalIntervals) * 100);
+                const targetPercentage = Math.round((midIndex / totalIntervals) * 100);
+
+                const refinedPrompt = `
+You are an expert animator creating a single frame for an animation sequence.
+
+**Overall Animation Goal:** "${prompt}"
+
+**Provided Frames:** You are given two keyframes:
+1. The frame at the ${startPercentage}% mark of the animation.
+2. The frame at the ${endPercentage}% mark of the animation.
+
+**Your Task:** Generate the single, high-quality frame that should appear precisely at the ${targetPercentage}% mark, exactly in the middle of the two provided frames.
+
+**Crucial Instructions for Smooth Animation:**
+- **Motion Arc:** The character's movement must follow a natural, smooth, curved path (an arc) between the start and end poses. Avoid linear, robotic-looking interpolation.
+- **Character Consistency:** The character's design, colors, proportions, and style MUST remain identical to the provided keyframes. Do not add, remove, or alter any character details.
+- **Background:** The background MUST be perfectly transparent.
+- **Interpolation Logic:** This frame is a critical in-between. It should logically and fluidly connect the start and end frames, showing a believable transition of the character's pose, position, and any moving parts.
+`;
+
                 const midFrameResponse = await ai.models.generateContent({
                     model: 'gemini-2.5-flash-image-preview',
                     contents: {
                         parts: [
                             startFramePart,
                             endFramePart,
-                            { text: `These are the start and end frames of a short animation sequence. The full animation is described as: "${prompt}". Generate the single frame that should appear exactly in the middle of these two. Ensure the background is transparent.` },
+                            { text: refinedPrompt },
                         ],
                     },
                     config: { responseModalities: [Modality.IMAGE, Modality.TEXT] },
