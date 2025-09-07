@@ -237,7 +237,7 @@ const App = () => {
 
 
         // Helper to generate a single frame between a start and end point
-        const generateSingleFrame = async (startIndex: number, endIndex: number, framePrompts: Record<string, string>[]) => {
+        const generateSingleFrame = async (startIndex: number, endIndex: number, framePrompts: Record<string, string>[], originalImage: string) => {
             const midIndex = Math.floor((startIndex + endIndex) / 2);
 
             if (!allFramesData[startIndex] || !allFramesData[endIndex] || !framePrompts[startIndex] || !framePrompts[midIndex]) {
@@ -246,6 +246,7 @@ const App = () => {
             }
 
             try {
+                const originalImagePart = dataUrlToGenerativePart(originalImage);
                 const startFramePart = dataUrlToGenerativePart(allFramesData[startIndex]!);
                 const endFramePart = dataUrlToGenerativePart(allFramesData[endIndex]!);
                 
@@ -260,23 +261,26 @@ const App = () => {
 
 
                 const refinedPrompt = `
-You are an expert animator creating a single frame of an animation with extreme precision.
+You are an expert animator executing a single, precise instruction for a motion photoshoot.
 
-**Context:** You are given two keyframes, a "Start Frame" and an "End Frame". Your task is to generate the frame that sits conceptually in the middle of their action.
+**REFERENCE IMAGES:**
+1.  **Original Image (Style Lock):** This is the "ground truth" for the character's appearance. The final output's art style, colors, and proportions MUST match this image with 100% fidelity.
+2.  **Start Frame:** This is the frame you will be modifying.
+3.  **End Frame:** This provides context for the end of the motion.
 
-**Primary Goal:** Your most important task is to follow a "delta" instruction. You must keep most of the character IDENTICAL to the "Start Frame" and ONLY modify the specific parts listed below.
+**PRIMARY GOAL:** Your task is to perform a minimal, surgical modification to the "Start Frame".
 
-**Instructions for THIS FRAME:**
+**INSTRUCTIONS FOR THIS FRAME:**
 
-1.  **UNCHANGED PARTS:** The following parts of the character MUST remain IDENTICAL to the "Start Frame" in every way (position, rotation, style, color):
-    **${unchangedDescription}**
-
-2.  **CHANGED PARTS:** From the "Start Frame" pose, ONLY modify the following parts. Animate them to match this new description:
+1.  **STEP 1: REPLICATE:** Start by creating a perfect, pixel-for-pixel copy of the "Start Frame".
+2.  **STEP 2: MODIFY:** Apply ONLY the following changes. DO NOT TOUCH any other part of the character.
+    -   **UNCHANGED PARTS:** The following parts MUST remain IDENTICAL to the "Start Frame": **${unchangedDescription}**
+    -   **CHANGED PARTS:** Modify ONLY these parts to match their new description:
 ${changeDescription}
 
-**Crucial Rules:**
-- **EXTREME FIDELITY:** This is not an interpolation. It is a precise modification. Replicate the "Start Frame" exactly, then apply ONLY the specified changes. Do not get creative.
-- **Character Consistency:** The character's overall design, art style, colors, and proportions must not change between frames.
+**CRUCIAL RULES:**
+- **MINIMAL CHANGE:** This is your most important rule. Do not get creative. Do not reinterpret the character. Your job is to execute a tiny, specific change.
+- **STYLE FIDELITY:** The final image must look exactly like the "Original Image" in terms of style.
 - **Background:** ${backgroundInstruction}
 `;
 
@@ -285,8 +289,9 @@ ${changeDescription}
                     model: 'gemini-2.5-flash-image-preview',
                     contents: {
                         parts: [
-                            startFramePart, // Explicitly the "Start Frame" for reference
-                            endFramePart,   // Context for the end of the motion segment
+                            originalImagePart, // Style Lock
+                            startFramePart,   // Frame to modify
+                            endFramePart,     // Context
                             { text: refinedPrompt },
                         ],
                     },
@@ -313,12 +318,14 @@ ${changeDescription}
             setLoadingMessage('Generating animation plan...');
             const isCyclicText = isCyclic ? "The animation should loop seamlessly, so the last frame should lead smoothly back into the first." : "The animation has a distinct start and end.";
             const plannerPrompt = `
-You are a master animator and puppeteer. A user wants to create a ${NUM_FRAMES}-frame animation.
+You are a master animator and puppeteer acting as a meticulous director for a motion photoshoot. A user wants to create a ${NUM_FRAMES}-frame animation.
 User's request: "${prompt}"
 ${isCyclicText}
 
 Your task is to create a detailed, frame-by-frame animation plan. This plan will define the precise pose of a character for ${NUM_FRAMES} frames.
 Focus *only* on the character's pose, position, and expression for each specific frame.
+
+**CRITICAL RULE:** The character's core appearance, art style, colors, proportions, and accessories (like sunglasses) MUST remain consistent across all frames. DO NOT change the facial expression unless the user's prompt *specifically* requests it (e.g., "looking surprised"). You are directing a model, not redesigning a character.
 
 Output your response as a JSON array of objects. Each object represents one frame and must contain the following keys: "notes", "head", "torso", "left_arm", "right_arm", "left_leg", "right_leg", "facial_expression".
 The values should be detailed string descriptions of the position and rotation of each body part. Be extremely specific to ensure a smooth, logical, and believable progression of movement. The array must contain exactly ${NUM_FRAMES} elements.
@@ -373,7 +380,7 @@ The values should be detailed string descriptions of the position and rotation o
                 contents: {
                     parts: [
                         initialFramePart,
-                        { text: `Redraw this character to be used as the first frame of an animation. Replicate the character's appearance, art style, colors, and proportions with EXTREME fidelity. Adhere strictly to this precise pose description: \`\`\`json\n${JSON.stringify(framePrompts[0], null, 2)}\n\`\`\` Follow this background instruction: "${backgroundInstruction}".` },
+                        { text: `Redraw this character to be used as the clean first frame of an animation. Replicate the character's appearance, art style, colors, and proportions with 100% fidelity. Your task is to place the character into this precise pose: \`\`\`json\n${JSON.stringify(framePrompts[0], null, 2)}\n\`\`\` Follow this background instruction: "${backgroundInstruction}". Do not alter the character's design in any way.` },
                     ],
                 },
                 config: { responseModalities: [Modality.IMAGE, Modality.TEXT] },
@@ -398,8 +405,9 @@ The values should be detailed string descriptions of the position and rotation o
                     model: 'gemini-2.5-flash-image-preview',
                     contents: {
                         parts: [
-                            dataUrlToGenerativePart(processedInitialImage),
-                            { text: `This is the first frame of an animation. Based on it, generate ONLY the final frame of the animation. Maintain the character's appearance and style perfectly. Adhere strictly to this precise pose description: \`\`\`json\n${JSON.stringify(framePrompts[NUM_FRAMES - 1], null, 2)}\n\`\`\` Follow this background instruction: "${backgroundInstruction}".` },
+                            dataUrlToGenerativePart(initialImage), // Original Image (Style Lock)
+                            dataUrlToGenerativePart(processedInitialImage), // Start Frame (Pose Reference)
+                            { text: `You are generating the final frame of an animation. Use the "Original Image" (the first image provided) as the absolute ground truth for art style, colors, and proportions. Use the "Start Frame" (the second image provided) as the base for modification. Your task is to modify the "Start Frame" to match this new pose description with perfect style consistency: \`\`\`json\n${JSON.stringify(framePrompts[NUM_FRAMES - 1], null, 2)}\n\`\`\` Follow this background instruction: "${backgroundInstruction}". Do not change any part of the character not specified in the pose description.` },
                         ],
                     },
                     config: { responseModalities: [Modality.IMAGE, Modality.TEXT] },
@@ -422,7 +430,7 @@ The values should be detailed string descriptions of the position and rotation o
             while (rangesToProcess.some(([start, end]) => end - start > 1)) {
                 const promises = rangesToProcess
                     .filter(([start, end]) => end - start > 1)
-                    .map(([start, end]) => generateSingleFrame(start, end, framePrompts));
+                    .map(([start, end]) => generateSingleFrame(start, end, framePrompts, initialImage));
 
                 const results = await Promise.all(promises);
                 
