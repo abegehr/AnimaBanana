@@ -13,6 +13,13 @@ import JSZip from 'jszip';
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 const NUM_FRAMES = 9;
 
+// Pricing constants based on published Google AI prices as of mid-2024.
+// These are for estimation purposes only.
+const GEMINI_FLASH_INPUT_PRICE_PER_MILLION_TOKENS = 0.35;
+const GEMINI_FLASH_OUTPUT_PRICE_PER_MILLION_TOKENS = 0.70;
+const IMAGE_GENERATION_PRICE_PER_IMAGE = 0.018; 
+
+
 // Helper to convert a data URL string to a GoogleGenAI.Part
 const dataUrlToGenerativePart = (dataUrl: string): { inlineData: { data: string; mimeType: string; } } => {
     const [header, data] = dataUrl.split(',');
@@ -85,6 +92,7 @@ const App = () => {
     const [progress, setProgress] = useState(0);
     const [isCyclic, setIsCyclic] = useState(false);
     const [loadingMessage, setLoadingMessage] = useState('');
+    const [estimatedCost, setEstimatedCost] = useState(0);
 
     const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -147,6 +155,7 @@ const App = () => {
         setIsLoading(true);
         setError(null);
         setProgress(0);
+        setEstimatedCost(0);
         
         const totalSteps = NUM_FRAMES + 1; // 1 for planning, NUM_FRAMES for image generation
 
@@ -237,6 +246,13 @@ Output your response as a JSON array of strings, where each string is a prompt f
                 },
             });
 
+            const usage = promptGenResponse.usageMetadata;
+            if (usage) {
+                const inputCost = (usage.promptTokenCount / 1_000_000) * GEMINI_FLASH_INPUT_PRICE_PER_MILLION_TOKENS;
+                const outputCost = (usage.candidatesTokenCount / 1_000_000) * GEMINI_FLASH_OUTPUT_PRICE_PER_MILLION_TOKENS;
+                setEstimatedCost(prev => prev + inputCost + outputCost);
+            }
+
             const generatedPrompts = JSON.parse(promptGenResponse.text);
 
             if (!Array.isArray(generatedPrompts) || generatedPrompts.length !== NUM_FRAMES || !generatedPrompts.every(p => typeof p === 'string')) {
@@ -264,6 +280,7 @@ Output your response as a JSON array of strings, where each string is a prompt f
             if (!firstImagePart || !('inlineData' in firstImagePart) || !firstImagePart.inlineData.data) {
                 throw new Error("API did not return the initial frame.");
             }
+            setEstimatedCost(prev => prev + IMAGE_GENERATION_PRICE_PER_IMAGE);
             const processedInitialImage = `data:${firstImagePart.inlineData.mimeType};base64,${firstImagePart.inlineData.data}`;
             allFramesData[0] = processedInitialImage;
             setGeneratedFrames([...allFramesData]);
@@ -285,11 +302,12 @@ Output your response as a JSON array of strings, where each string is a prompt f
                     },
                     config: { responseModalities: [Modality.IMAGE, Modality.TEXT] },
                 });
-
+                
                 const lastImagePart = lastFrameResponse.candidates?.[0]?.content.parts.find(p => 'inlineData' in p);
                 if (!lastImagePart || !('inlineData' in lastImagePart) || !lastImagePart.inlineData.data) {
                     throw new Error("API did not return the last frame.");
                 }
+                setEstimatedCost(prev => prev + IMAGE_GENERATION_PRICE_PER_IMAGE);
                 const lastFrameBase64 = `data:${lastImagePart.inlineData.mimeType};base64,${lastImagePart.inlineData.data}`;
                 allFramesData[NUM_FRAMES - 1] = lastFrameBase64;
                 setProgress(prev => prev + 1);
@@ -309,6 +327,11 @@ Output your response as a JSON array of strings, where each string is a prompt f
 
                 const results = await Promise.all(promises);
                 
+                const successfulGenerations = results.filter(Boolean).length;
+                if (successfulGenerations > 0) {
+                     setEstimatedCost(prev => prev + (successfulGenerations * IMAGE_GENERATION_PRICE_PER_IMAGE));
+                }
+
                 results.forEach(result => {
                     if (result) {
                         allFramesData[result.index] = result.frame;
@@ -453,6 +476,11 @@ Output your response as a JSON array of strings, where each string is a prompt f
                     >
                         {getLoadingText()}
                     </button>
+                    {(isLoading || hasGeneratedFrames) && (
+                        <div className="text-center text-sm text-gray-400 mt-2">
+                            Estimated Cost: <span className="font-semibold text-gray-300">${estimatedCost.toFixed(5)}</span>
+                        </div>
+                    )}
                     {error && <p className="text-red-400 text-sm mt-2">{error}</p>}
                 </div>
                 
