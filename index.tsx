@@ -10,7 +10,7 @@ import { GoogleGenAI, Modality } from '@google/genai';
 import GIFEncoder from 'gif-encoder-2';
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-const NUM_FRAMES = 10;
+const NUM_FRAMES = 9;
 
 // Helper to convert a data URL string to a GoogleGenAI.Part
 const dataUrlToGenerativePart = (dataUrl: string): { inlineData: { data: string; mimeType: string; } } => {
@@ -83,42 +83,72 @@ const App = () => {
     };
 
     const createGif = useCallback(async (frames: string[]) => {
-        if (frames.length < 2) return;
-
-        const imagePromises = frames.map(frameData => {
-            return new Promise<HTMLImageElement>((resolve, reject) => {
-                const img = new Image();
-                img.onload = () => resolve(img);
-                img.onerror = reject;
-                img.src = frameData;
+        if (frames.length < 2) {
+            setError("Not enough frames to create a GIF.");
+            return;
+        }
+    
+        try {
+            // Load all frame images
+            const imagePromises = frames.map(frameData => {
+                return new Promise<HTMLImageElement>((resolve, reject) => {
+                    const img = new Image();
+                    img.onload = () => resolve(img);
+                    img.onerror = (err) => reject(new Error(`Failed to load frame: ${err}`));
+                    img.src = frameData;
+                });
             });
-        });
-
-        const images = await Promise.all(imagePromises);
-        const { width, height } = images[0];
-
-        const encoder = new GIFEncoder(width, height);
-        encoder.start();
-        encoder.setRepeat(0); 
-        encoder.setDelay(150); 
-
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-
-        for (const img of images) {
-            if (ctx) {
-                ctx.clearRect(0, 0, width, height);
+    
+            const images = await Promise.all(imagePromises);
+            const { width, height } = images[0];
+    
+            // Use a temporary canvas to draw frames
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+    
+            if (!ctx) {
+                throw new Error("Failed to create canvas context for GIF generation.");
+            }
+    
+            // Initialize GIF encoder with Octree quantizer for better quality with cartoons
+            const encoder = new GIFEncoder(width, height, 'octree');
+            encoder.start();
+            encoder.setRepeat(0);      // 0 for repeat forever
+            encoder.setDelay(100);     // 100ms delay for 10 FPS
+            encoder.setQuality(10);    // 10 is best quality
+            
+            // Use a "magic" color (magenta) for transparency.
+            // We'll fill the background with this, draw the image on top,
+            // and then tell the encoder to treat this color as transparent.
+            const transparentColor = '#ff00ff';
+            const transparentColorHex = 0xff00ff;
+            encoder.setTransparent(transparentColorHex);
+    
+            // Process each frame
+            for (const img of images) {
+                // Fill background with the magic transparent color
+                ctx.fillStyle = transparentColor;
+                ctx.fillRect(0, 0, width, height);
+    
+                // Draw the actual frame image (with its own transparency) on top
                 ctx.drawImage(img, 0, 0, width, height);
+    
+                // Add the composed frame to the GIF
                 encoder.addFrame(ctx);
             }
+    
+            // Finalize GIF
+            encoder.finish();
+            const buffer = encoder.out.getData();
+            const blob = new Blob([buffer], { type: 'image/gif' });
+            setFinalGif(URL.createObjectURL(blob));
+        } catch (err) {
+            console.error("GIF creation failed:", err);
+            const message = err instanceof Error ? err.message : "An unknown error occurred during GIF creation.";
+            setError(message);
         }
-
-        encoder.finish();
-        const buffer = encoder.out.getData();
-        const blob = new Blob([buffer], { type: 'image/gif' });
-        setFinalGif(URL.createObjectURL(blob));
     }, []);
 
     const generateAnimation = async () => {
@@ -136,10 +166,50 @@ const App = () => {
         setGeneratedFrames([...allFramesData]);
         setProgress(1);
 
-        try {
-            const initialFramePart = dataUrlToGenerativePart(initialImage);
+        // Helper to generate a single frame between a start and end point
+        const generateSingleFrame = async (startIndex: number, endIndex: number) => {
+            const midIndex = Math.floor((startIndex + endIndex) / 2);
 
+            // Abort if the boundary frames don't exist
+            if (!allFramesData[startIndex] || !allFramesData[endIndex]) {
+                console.warn(`Skipping frame ${midIndex} due to missing boundary images.`);
+                return null;
+            }
+
+            try {
+                const startFramePart = dataUrlToGenerativePart(allFramesData[startIndex]!);
+                const endFramePart = dataUrlToGenerativePart(allFramesData[endIndex]!);
+
+                const midFrameResponse = await ai.models.generateContent({
+                    model: 'gemini-2.5-flash-image-preview',
+                    contents: {
+                        parts: [
+                            startFramePart,
+                            endFramePart,
+                            { text: `These are the start and end frames of a short animation sequence. The full animation is described as: "${prompt}". Generate the single frame that should appear exactly in the middle of these two. Ensure the background is transparent.` },
+                        ],
+                    },
+                    config: { responseModalities: [Modality.IMAGE, Modality.TEXT] },
+                });
+
+                const midImagePart = midFrameResponse.candidates?.[0]?.content.parts.find(p => 'inlineData' in p);
+                if (midImagePart && 'inlineData' in midImagePart && midImagePart.inlineData.data) {
+                    return {
+                        index: midIndex,
+                        frame: `data:${midImagePart.inlineData.mimeType};base64,${midImagePart.inlineData.data}`
+                    };
+                }
+                console.warn(`Could not extract image data for frame index ${midIndex}.`);
+                return null;
+            } catch (err) {
+                console.error(`Failed to generate frame at index ${midIndex}:`, err);
+                return null;
+            }
+        };
+
+        try {
             // 1. Generate the last frame
+            const initialFramePart = dataUrlToGenerativePart(initialImage);
             const lastFrameResponse = await ai.models.generateContent({
                 model: 'gemini-2.5-flash-image-preview',
                 contents: {
@@ -160,47 +230,40 @@ const App = () => {
             setGeneratedFrames([...allFramesData]);
             setProgress(prev => prev + 1);
 
-            // 2. Recursively generate in-between frames
-            const generateInbetweens = async (startIndex: number, endIndex: number) => {
-                if (endIndex - startIndex <= 1) return;
+            // 2. Iteratively generate in-between frames level by level
+            let rangesToProcess: [number, number][] = [[0, NUM_FRAMES - 1]];
 
-                const midIndex = Math.floor((startIndex + endIndex) / 2);
+            // Continue as long as there's a gap larger than 1 to fill
+            while (rangesToProcess.some(([start, end]) => end - start > 1)) {
+                // Get all frames that need to be generated in this level
+                const promises = rangesToProcess
+                    .filter(([start, end]) => end - start > 1)
+                    .map(([start, end]) => generateSingleFrame(start, end));
 
-                const startFramePart = dataUrlToGenerativePart(allFramesData[startIndex]!);
-                const endFramePart = dataUrlToGenerativePart(allFramesData[endIndex]!);
-
-                const midFrameResponse = await ai.models.generateContent({
-                    model: 'gemini-2.5-flash-image-preview',
-                    contents: {
-                        parts: [
-                            startFramePart,
-                            endFramePart,
-                            { text: `These are the start and end frames of a short animation sequence. The full animation is described as: "${prompt}". Generate the single frame that should appear exactly in the middle of these two. Ensure the background is transparent.` },
-                        ],
-                    },
-                    config: { responseModalities: [Modality.IMAGE, Modality.TEXT] },
+                const results = await Promise.all(promises);
+                
+                // Update the main frames array with the results
+                results.forEach(result => {
+                    if (result) {
+                        allFramesData[result.index] = result.frame;
+                    }
                 });
 
-                const midImagePart = midFrameResponse.candidates?.[0]?.content.parts.find(p => 'inlineData' in p);
-                if (midImagePart && 'inlineData' in midImagePart && midImagePart.inlineData.data) {
-                    const midFrameBase64 = `data:${midImagePart.inlineData.mimeType};base64,${midImagePart.inlineData.data}`;
-                    allFramesData[midIndex] = midFrameBase64;
-                    setGeneratedFrames([...allFramesData]);
-                    setProgress(prev => prev + 1);
-                } else {
-                    console.warn(`Could not generate frame at index ${midIndex}. Skipping.`);
-                }
-
-                await Promise.all([
-                    generateInbetweens(startIndex, midIndex),
-                    generateInbetweens(midIndex, endIndex)
-                ]);
-            };
-
-            await generateInbetweens(0, NUM_FRAMES - 1);
+                // Update progress and UI
+                setProgress(prev => prev + results.filter(Boolean).length);
+                setGeneratedFrames([...allFramesData]);
+                
+                // Create the next level of smaller ranges
+                const nextRanges: [number, number][] = [];
+                rangesToProcess.forEach(([start, end]) => {
+                    const mid = Math.floor((start + end) / 2);
+                    nextRanges.push([start, mid]);
+                    nextRanges.push([mid, end]);
+                });
+                rangesToProcess = nextRanges;
+            }
 
             const finalFrames = allFramesData.filter((frame): frame is string => frame !== null);
-
             if (finalFrames.length < 2) {
                 throw new Error("Not enough frames were generated to create a GIF.");
             }
@@ -289,7 +352,7 @@ const App = () => {
                                     <div style={{ width: `${(progress / NUM_FRAMES) * 100}%` }} className="shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center bg-gradient-to-r from-purple-500 to-pink-500 transition-all duration-300"></div>
                                 </div>
                             </div>
-                            <div className="grid grid-cols-5 gap-2 mt-4">
+                            <div className="grid grid-cols-3 gap-2 mt-4">
                                 {generatedFrames.map((frame, index) => (
                                     frame ? 
                                     <img key={index} src={frame} alt={`Frame ${index + 1}`} className="w-full aspect-square object-contain rounded-md bg-gray-700" />
