@@ -20,26 +20,34 @@ const dataUrlToGenerativePart = (dataUrl: string): { inlineData: { data: string;
     };
 };
 
-const AnimationPlayer = ({ frames }: { frames: string[] }) => {
+const AnimationPlayer = ({ frames }: { frames: (string | null)[] }) => {
     const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
 
     useEffect(() => {
-        if (!frames || frames.length === 0) return;
-
+        // Set up a timer that cycles through all potential frame indices
         const interval = setInterval(() => {
-            setCurrentFrameIndex((prevIndex) => (prevIndex + 1) % frames.length);
+            setCurrentFrameIndex((prevIndex) => (prevIndex + 1) % NUM_FRAMES);
         }, 100); // 100ms for 10 FPS
 
         return () => clearInterval(interval);
-    }, [frames]);
+    }, []); // Run only once to set up the timer
 
-    if (!frames || frames.length === 0) {
-        return null;
+    // For the current index, find the last available frame by looking backwards
+    let imageToDisplay: string | null = null;
+    for (let i = currentFrameIndex; i >= 0; i--) {
+        if (frames[i]) {
+            imageToDisplay = frames[i];
+            break;
+        }
+    }
+
+    if (!imageToDisplay) {
+        return null; // Don't render if no frames are available yet up to this point
     }
 
     return (
         <img
-            src={frames[currentFrameIndex]}
+            src={imageToDisplay}
             alt="Live animation"
             className="rounded-lg max-w-full h-auto max-h-80 shadow-lg"
         />
@@ -253,6 +261,7 @@ const App = () => {
     };
     
     const isGenerationComplete = !isLoading && generatedFrames.some(f => f !== null);
+    const hasGeneratedFrames = generatedFrames.some(f => f !== null);
 
     return (
         <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center p-4 sm:p-6 md:p-10">
@@ -350,13 +359,13 @@ const App = () => {
                 </div>
             </main>
 
-            {isGenerationComplete && (
+            {hasGeneratedFrames && (
                  <section className="w-full max-w-5xl mt-8 bg-gray-800 p-8 rounded-2xl shadow-2xl text-center">
                     <h2 className="text-2xl font-bold mb-4 text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-600">
                         Animation Preview
                     </h2>
                     <div className="flex justify-center">
-                        <AnimationPlayer frames={generatedFrames.filter((f): f is string => f !== null)} />
+                        <AnimationPlayer frames={generatedFrames} />
                     </div>
                 </section>
             )}
