@@ -7,6 +7,8 @@
 import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { GoogleGenAI, Modality, Type } from '@google/genai';
+import JSZip from 'jszip';
+
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 const NUM_FRAMES = 9;
@@ -341,8 +343,42 @@ Output your response as a JSON array of strings, where each string is a prompt f
             setLoadingMessage('');
         }
     };
+
+    const handleDownload = async () => {
+        const zip = new JSZip();
+        let frameCount = 0;
     
-    const isGenerationComplete = !isLoading && generatedFrames.some(f => f !== null);
+        generatedFrames.forEach((frameDataUrl, index) => {
+            if (frameDataUrl) {
+                frameCount++;
+                const base64Data = frameDataUrl.split(',')[1];
+                const paddedIndex = String(index).padStart(2, '0');
+                zip.file(`frame_${paddedIndex}.png`, base64Data, { base64: true });
+            }
+        });
+    
+        if (frameCount > 0) {
+            try {
+                const content = await zip.generateAsync({ type: 'blob' });
+                const sanitizedPrompt = prompt.replace(/[^a-z0-9]/gi, '_').toLowerCase().slice(0, 30) || 'animation';
+                const zipFileName = `${sanitizedPrompt}.zip`;
+        
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(content);
+                link.download = zipFileName;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                URL.revokeObjectURL(link.href);
+
+            } catch(err) {
+                console.error("Failed to create zip file.", err);
+                setError("Sorry, could not create the zip file for download.");
+            }
+        }
+    };
+    
+    const isGenerationComplete = !isLoading && generatedFrames.every(f => f !== null);
     const hasGeneratedFrames = generatedFrames.some(f => f !== null);
     const totalSteps = NUM_FRAMES + 1;
 
@@ -422,7 +458,7 @@ Output your response as a JSON array of strings, where each string is a prompt f
                 
                 {/* Output */}
                 <div className="flex flex-col items-center justify-center bg-black/20 rounded-lg p-4 min-h-[300px]">
-                    {isLoading || isGenerationComplete ? (
+                    {hasGeneratedFrames ? (
                         <div className="w-full">
                             {isLoading && (
                                 <div className="relative pt-1">
@@ -431,7 +467,7 @@ Output your response as a JSON array of strings, where each string is a prompt f
                                     </div>
                                 </div>
                             )}
-                            {isGenerationComplete && <h3 className="text-xl font-semibold mb-4 text-center">Generated Frames</h3>}
+                            {!isLoading && <h3 className="text-xl font-semibold mb-4 text-center">Generated Frames</h3>}
                             <div className="grid grid-cols-3 gap-2 mt-4">
                                 {generatedFrames.map((frame, index) => (
                                     frame ? 
@@ -457,6 +493,16 @@ Output your response as a JSON array of strings, where each string is a prompt f
                     <div className="flex justify-center">
                         <AnimationPlayer frames={generatedFrames} />
                     </div>
+                    {isGenerationComplete && (
+                         <div className="mt-6">
+                            <button
+                                onClick={handleDownload}
+                                className="rounded-md bg-pink-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-pink-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-pink-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                            >
+                                Download Frames (.zip)
+                            </button>
+                        </div>
+                    )}
                 </section>
             )}
 
