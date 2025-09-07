@@ -168,7 +168,7 @@ const App = () => {
 
 
         // Helper to generate a single frame between a start and end point
-        const generateSingleFrame = async (startIndex: number, endIndex: number, frameDescription: string) => {
+        const generateSingleFrame = async (startIndex: number, endIndex: number, frameDescription: Record<string, string>) => {
             const midIndex = Math.floor((startIndex + endIndex) / 2);
 
             if (!allFramesData[startIndex] || !allFramesData[endIndex]) {
@@ -181,16 +181,19 @@ const App = () => {
                 const endFramePart = dataUrlToGenerativePart(allFramesData[endIndex]!);
                 
                 const refinedPrompt = `
-You are an expert animator creating a single in-between frame for an animation.
+You are an expert animator rendering a single, specific frame of an animation based on a detailed pose specification.
 
-**Context:** You are given the start frame and end frame for a small segment of a larger animation.
-**Your Task:** Generate the single frame that should appear exactly in the middle of the two provided frames, based on the specific description below.
+**Context:** You are given the start frame and end frame for a small segment of a larger animation. These are for stylistic and positional reference ONLY.
+**Your Primary Task:** Your main goal is to generate the single frame that should appear exactly in the middle of the two provided frames. However, you MUST adhere strictly to the following precise pose description. Do not just interpolate; render this exact pose.
 
-**Frame-Specific Description:** "${frameDescription}"
+**Detailed Pose Specification for THIS FRAME:**
+\`\`\`json
+${JSON.stringify(frameDescription, null, 2)}
+\`\`\`
 
-**Crucial Instructions for Smooth Animation:**
-- **Motion Arc:** The movement must follow a natural, smooth, curved path (an arc). Avoid linear interpolation.
-- **Character Consistency:** The character's design, art style, colors, and proportions MUST remain identical to the provided keyframes.
+**Crucial Instructions:**
+- **Strict Pose Adherence:** The JSON pose described above is the absolute ground truth. Render it as accurately as possible.
+- **Character Consistency:** The character's design, art style, colors, and proportions MUST remain identical to the provided keyframes. Replicate the style with extreme fidelity.
 - **Background:** ${backgroundInstruction}
 `;
 
@@ -226,13 +229,15 @@ You are an expert animator creating a single in-between frame for an animation.
             setLoadingMessage('Generating animation plan...');
             const isCyclicText = isCyclic ? "The animation should loop seamlessly, so the last frame should lead smoothly back into the first." : "The animation has a distinct start and end.";
             const plannerPrompt = `
-You are an expert animation planner. A user wants to create a ${NUM_FRAMES}-frame animation.
+You are a master animator and puppeteer. A user wants to create a ${NUM_FRAMES}-frame animation.
 User's request: "${prompt}"
 ${isCyclicText}
 
-Your task is to generate a series of ${NUM_FRAMES} detailed, frame-by-frame descriptions. Each description must create a smooth, logical, and believable progression of movement. Focus *only* on the character's pose, position, and expression for each specific frame. Do not describe the background or art style, as that will be preserved from the original image.
+Your task is to create a detailed, frame-by-frame animation plan. This plan will define the precise pose of a character for ${NUM_FRAMES} frames.
+Focus *only* on the character's pose, position, and expression for each specific frame.
 
-Output your response as a JSON array of strings, where each string is a prompt for one frame. The array must contain exactly ${NUM_FRAMES} elements.
+Output your response as a JSON array of objects. Each object represents one frame and must contain the following keys: "notes", "head", "torso", "left_arm", "right_arm", "left_leg", "right_leg", "facial_expression".
+The values should be detailed string descriptions of the position and rotation of each body part. Be extremely specific to ensure a smooth, logical, and believable progression of movement. The array must contain exactly ${NUM_FRAMES} elements.
 `;
             const promptGenResponse = await ai.models.generateContent({
                 model: 'gemini-2.5-flash',
@@ -241,7 +246,20 @@ Output your response as a JSON array of strings, where each string is a prompt f
                     responseMimeType: "application/json",
                     responseSchema: {
                         type: Type.ARRAY,
-                        items: { type: Type.STRING },
+                        items: {
+                            type: Type.OBJECT,
+                            properties: {
+                                notes: { type: Type.STRING, description: "A brief summary of the action in this frame." },
+                                head: { type: Type.STRING, description: "Position and orientation of the head." },
+                                torso: { type: Type.STRING, description: "Position and orientation of the torso." },
+                                left_arm: { type: Type.STRING, description: "Position, rotation, and gesture of the left arm and hand." },
+                                right_arm: { type: Type.STRING, description: "Position, rotation, and gesture of the right arm and hand." },
+                                left_leg: { type: Type.STRING, description: "Position and orientation of the left leg and foot." },
+                                right_leg: { type: Type.STRING, description: "Position and orientation of the right leg and foot." },
+                                facial_expression: { type: Type.STRING, description: "The character's facial expression, including eyes and mouth." },
+                            },
+                             required: ["notes", "head", "torso", "left_arm", "right_arm", "left_leg", "right_leg", "facial_expression"]
+                        },
                     },
                 },
             });
@@ -255,10 +273,10 @@ Output your response as a JSON array of strings, where each string is a prompt f
 
             const generatedPrompts = JSON.parse(promptGenResponse.text);
 
-            if (!Array.isArray(generatedPrompts) || generatedPrompts.length !== NUM_FRAMES || !generatedPrompts.every(p => typeof p === 'string')) {
+            if (!Array.isArray(generatedPrompts) || generatedPrompts.length !== NUM_FRAMES || !generatedPrompts.every(p => typeof p === 'object' && p !== null)) {
                 throw new Error('The AI failed to generate a valid animation plan. Please try a different prompt.');
             }
-            const framePrompts = generatedPrompts as string[];
+            const framePrompts = generatedPrompts as Record<string, string>[];
             setProgress(1);
             setLoadingMessage('Generating frames...');
 
@@ -271,7 +289,7 @@ Output your response as a JSON array of strings, where each string is a prompt f
                 contents: {
                     parts: [
                         initialFramePart,
-                        { text: `Redraw this character to be used as the first frame of an animation. It is CRITICAL that you replicate the character's appearance, art style, colors, and proportions from the provided image with EXTREME fidelity. Do not change the character. Follow this background instruction: "${backgroundInstruction}". This frame corresponds to the animation description: "${framePrompts[0]}"` },
+                        { text: `Redraw this character to be used as the first frame of an animation. Replicate the character's appearance, art style, colors, and proportions with EXTREME fidelity. Adhere strictly to this precise pose description: \`\`\`json\n${JSON.stringify(framePrompts[0], null, 2)}\n\`\`\` Follow this background instruction: "${backgroundInstruction}".` },
                     ],
                 },
                 config: { responseModalities: [Modality.IMAGE, Modality.TEXT] },
@@ -297,7 +315,7 @@ Output your response as a JSON array of strings, where each string is a prompt f
                     contents: {
                         parts: [
                             dataUrlToGenerativePart(processedInitialImage),
-                            { text: `This is the first frame of an animation. Based on it, generate ONLY the final frame of the animation, following this specific description: "${framePrompts[NUM_FRAMES - 1]}". Maintain the character's appearance and style perfectly. Follow this background instruction: "${backgroundInstruction}".` },
+                            { text: `This is the first frame of an animation. Based on it, generate ONLY the final frame of the animation. Maintain the character's appearance and style perfectly. Adhere strictly to this precise pose description: \`\`\`json\n${JSON.stringify(framePrompts[NUM_FRAMES - 1], null, 2)}\n\`\`\` Follow this background instruction: "${backgroundInstruction}".` },
                         ],
                     },
                     config: { responseModalities: [Modality.IMAGE, Modality.TEXT] },
