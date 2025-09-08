@@ -149,55 +149,75 @@ const AnimationPlayer = ({ frames, fps }: { frames: (string | null)[]; fps: numb
     );
 };
 
-const FrameCorrectorModal = ({
-    frameIndex,
+const FrameCorrectionModal = ({
+    frameIndices,
     generatedFrames,
     initialImage,
     backgroundInstruction,
     onClose,
     onRegenerate,
 }: {
-    frameIndex: number;
+    frameIndices: number[];
     generatedFrames: (string | null)[];
     initialImage: string;
     backgroundInstruction: string;
     onClose: () => void;
-    onRegenerate: (frameIndex: number, newFrame: string) => void;
+    onRegenerate: (updates: { index: number; frame: string }[]) => void;
 }) => {
     const [correctionPrompt, setCorrectionPrompt] = useState('');
     const [isRegenerating, setIsRegenerating] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [progressMessage, setProgressMessage] = useState('');
 
-    const prevFrame = frameIndex > 0 ? generatedFrames[frameIndex - 1] : null;
-    const currentFrame = generatedFrames[frameIndex];
-    const nextFrame = frameIndex < NUM_FRAMES - 1 ? generatedFrames[frameIndex + 1] : null;
+    if (!frameIndices || frameIndices.length === 0) return null;
+    const sortedIndices = frameIndices.sort((a, b) => a - b);
+    const firstIndex = sortedIndices[0];
+    const lastIndex = sortedIndices[sortedIndices.length - 1];
+
+    const prevFrame = firstIndex > 0 ? generatedFrames[firstIndex - 1] : null;
+    const firstSelectedFrame = generatedFrames[firstIndex];
+    const lastSelectedFrame = generatedFrames[lastIndex];
+    const nextFrame = lastIndex < NUM_FRAMES - 1 ? generatedFrames[lastIndex + 1] : null;
 
     const handleRegenerateClick = async () => {
-        if (!correctionPrompt || !currentFrame) return;
+        if (!correctionPrompt || sortedIndices.length === 0) return;
         setIsRegenerating(true);
         setError(null);
+        setProgressMessage('');
+
+        const tempFrames = [...generatedFrames];
+        const newFrameUpdates: { index: number; frame: string }[] = [];
+
         try {
-            // FIX: Explicitly type `parts` to allow both image and text objects, preventing a type inference error.
-            const parts: ({ inlineData: { data: string; mimeType: string; } } | { text: string })[] = [
-                dataUrlToGenerativePart(initialImage), // Style Lock
-            ];
-            
-            let contextPrompt = '';
+            for (let i = 0; i < sortedIndices.length; i++) {
+                const frameIndex = sortedIndices[i];
+                const currentFrameToCorrect = tempFrames[frameIndex];
+                if (!currentFrameToCorrect) continue;
 
-            if (prevFrame) {
-                parts.push(dataUrlToGenerativePart(prevFrame));
-                contextPrompt += '2. **Previous Frame:** The frame that comes just before the one you are creating.\n';
-            }
-            parts.push(dataUrlToGenerativePart(currentFrame));
-            contextPrompt += `${parts.length}. **Frame to Correct:** This is the current, flawed frame that you need to fix.\n`;
+                setProgressMessage(`Regenerating frame ${i + 1} of ${sortedIndices.length}...`);
 
-            if (nextFrame) {
-                parts.push(dataUrlToGenerativePart(nextFrame));
-                contextPrompt += `${parts.length}. **Next Frame:** The frame that comes just after the one you are creating.\n`;
-            }
+                const parts: ({ inlineData: { data: string; mimeType: string; } } | { text: string })[] = [
+                    dataUrlToGenerativePart(initialImage), // Style Lock
+                ];
+                
+                let contextPrompt = '';
+                const prevContextFrame = frameIndex > 0 ? tempFrames[frameIndex - 1] : null;
+                const nextContextFrame = frameIndex < NUM_FRAMES - 1 ? tempFrames[frameIndex + 1] : null;
+
+                if (prevContextFrame) {
+                    parts.push(dataUrlToGenerativePart(prevContextFrame));
+                    contextPrompt += '2. **Previous Frame:** The frame that comes just before the one you are creating.\n';
+                }
+                parts.push(dataUrlToGenerativePart(currentFrameToCorrect));
+                contextPrompt += `${parts.length}. **Frame to Correct:** This is the current, flawed frame that you need to fix.\n`;
+
+                if (nextContextFrame) {
+                    parts.push(dataUrlToGenerativePart(nextContextFrame));
+                    contextPrompt += `${parts.length}. **Next Frame:** The frame that comes just after the one you are creating.\n`;
+                }
 
 
-            const refinedPrompt = `You are an expert animator performing a correction on a single animation frame.
+                const refinedPrompt = `You are an expert animator performing a correction on a single animation frame.
 
 **REFERENCE IMAGES:**
 1. **Original Image (Style Lock):** The ground truth for character style, color, and proportions. You MUST match this.
@@ -214,54 +234,66 @@ Redraw the "Frame to Correct" to incorporate the user's request. The new frame M
 
 Focus on applying the user's correction while preserving the flow of the animation.
 `;
-            parts.push({ text: refinedPrompt });
+                parts.push({ text: refinedPrompt });
 
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash-image-preview',
-                contents: { parts },
-                config: { responseModalities: [Modality.IMAGE, Modality.TEXT] },
-            });
+                const response = await ai.models.generateContent({
+                    model: 'gemini-2.5-flash-image-preview',
+                    contents: { parts },
+                    config: { responseModalities: [Modality.IMAGE, Modality.TEXT] },
+                });
 
-            const newImagePart = response.candidates?.[0]?.content.parts.find(p => 'inlineData' in p);
-            if (newImagePart && 'inlineData' in newImagePart && newImagePart.inlineData.data) {
-                const newFrameData = `data:${newImagePart.inlineData.mimeType};base64,${newImagePart.inlineData.data}`;
-                onRegenerate(frameIndex, newFrameData);
-                onClose();
-            } else {
-                throw new Error('AI did not return a valid image. Please try again.');
+                const newImagePart = response.candidates?.[0]?.content.parts.find(p => 'inlineData' in p);
+                if (newImagePart && 'inlineData' in newImagePart && newImagePart.inlineData.data) {
+                    const newFrameData = `data:${newImagePart.inlineData.mimeType};base64,${newImagePart.inlineData.data}`;
+                    tempFrames[frameIndex] = newFrameData;
+                    newFrameUpdates.push({ index: frameIndex, frame: newFrameData });
+                } else {
+                    throw new Error(`AI did not return a valid image for frame ${frameIndex + 1}.`);
+                }
             }
+
+            onRegenerate(newFrameUpdates);
+            onClose();
+
         } catch (err) {
             console.error('Frame regeneration failed:', err);
             setError(err instanceof Error ? err.message : 'An unknown error occurred.');
         } finally {
             setIsRegenerating(false);
+            setProgressMessage('');
         }
     };
 
-    if (!currentFrame) return null;
+    if (!firstSelectedFrame) return null;
+
+    const indicesString = sortedIndices.map(i => i + 1).join(', ');
 
     return (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" aria-modal="true" role="dialog">
-            <div className="bg-gray-800 rounded-2xl shadow-xl w-full max-w-4xl max-h-full overflow-y-auto p-6">
+            <div className="bg-gray-800 rounded-2xl shadow-xl w-full max-w-5xl max-h-full overflow-y-auto p-6">
                 <div className="flex justify-between items-center mb-4">
                     <h2 className="text-2xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-600">
-                        Correct Frame {frameIndex + 1}
+                        Correct Frame(s) {indicesString}
                     </h2>
                     <button onClick={onClose} className="text-gray-400 hover:text-white">&times;</button>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-                    <div className="flex flex-col items-center">
-                        <h3 className="text-lg font-semibold text-gray-400 mb-2">Previous Frame</h3>
-                        {prevFrame ? <img src={prevFrame} className="rounded-lg w-full aspect-square object-contain bg-black/20" /> : <div className="text-gray-500 italic">N/A</div>}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4 text-center">
+                    <div>
+                        <h3 className="text-lg font-semibold text-gray-400 mb-2">Before Selection</h3>
+                        {prevFrame ? <img src={prevFrame} className="rounded-lg w-full aspect-square object-contain bg-black/20" /> : <div className="text-gray-500 italic aspect-square flex items-center justify-center">N/A</div>}
                     </div>
-                     <div className="flex flex-col items-center border-2 border-pink-500 p-2 rounded-lg">
-                        <h3 className="text-lg font-semibold text-pink-400 mb-2">Frame to Correct</h3>
-                        <img src={currentFrame} className="rounded-lg w-full aspect-square object-contain bg-black/20" />
+                     <div className="border-2 border-pink-500 p-2 rounded-lg">
+                        <h3 className="text-lg font-semibold text-pink-400 mb-2">First Selected</h3>
+                        <img src={firstSelectedFrame} className="rounded-lg w-full aspect-square object-contain bg-black/20" />
                     </div>
-                    <div className="flex flex-col items-center">
-                        <h3 className="text-lg font-semibold text-gray-400 mb-2">Next Frame</h3>
-                        {nextFrame ? <img src={nextFrame} className="rounded-lg w-full aspect-square object-contain bg-black/20" /> : <div className="text-gray-500 italic">N/A</div>}
+                     <div className="border-2 border-pink-500 p-2 rounded-lg">
+                        <h3 className="text-lg font-semibold text-pink-400 mb-2">Last Selected</h3>
+                        {lastSelectedFrame ? <img src={lastSelectedFrame} className="rounded-lg w-full aspect-square object-contain bg-black/20" /> : <div className="text-gray-500 italic aspect-square flex items-center justify-center">N/A</div>}
+                    </div>
+                    <div>
+                        <h3 className="text-lg font-semibold text-gray-400 mb-2">After Selection</h3>
+                        {nextFrame ? <img src={nextFrame} className="rounded-lg w-full aspect-square object-contain bg-black/20" /> : <div className="text-gray-500 italic aspect-square flex items-center justify-center">N/A</div>}
                     </div>
                 </div>
 
@@ -277,6 +309,7 @@ Focus on applying the user's correction while preserving the flow of the animati
                     />
                 </div>
 
+                {progressMessage && <p className="text-purple-300 text-sm mt-2 text-center">{progressMessage}</p>}
                 {error && <p className="text-red-400 text-sm mt-2">{error}</p>}
 
                 <div className="mt-6 flex justify-end gap-4">
@@ -286,7 +319,7 @@ Focus on applying the user's correction while preserving the flow of the animati
                         disabled={isRegenerating || !correctionPrompt}
                         className="rounded-md bg-purple-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-purple-500 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                        {isRegenerating ? 'Regenerating...' : 'Re-generate Frame'}
+                        {isRegenerating ? 'Regenerating...' : `Re-generate ${sortedIndices.length} Frame(s)`}
                     </button>
                 </div>
             </div>
@@ -307,7 +340,9 @@ const App = () => {
     const [loadingMessage, setLoadingMessage] = useState('');
     const [estimatedCost, setEstimatedCost] = useState(0);
     const [fps, setFps] = useState(5);
-    const [editingFrameIndex, setEditingFrameIndex] = useState<number | null>(null);
+    const [selectedFrameIndices, setSelectedFrameIndices] = useState<number[]>([]);
+    const [editingFrameIndices, setEditingFrameIndices] = useState<number[] | null>(null);
+
 
     const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -316,7 +351,8 @@ const App = () => {
             setError(null);
             setInitialImage(null);
             setInitialImageHasTransparency(false);
-            setEditingFrameIndex(null);
+            setSelectedFrameIndices([]);
+            setEditingFrameIndices(null);
 
             const reader = new FileReader();
             reader.onload = (event) => {
@@ -655,13 +691,27 @@ The values should be detailed string descriptions of the position and rotation o
         }
     };
     
-    const handleFrameRegenerate = (frameIndex: number, newFrame: string) => {
+    const handleFramesRegenerate = (updates: { index: number; frame: string }[]) => {
         setGeneratedFrames(prevFrames => {
             const newFrames = [...prevFrames];
-            newFrames[frameIndex] = newFrame;
+            updates.forEach(({ index, frame }) => {
+                newFrames[index] = frame;
+            });
             return newFrames;
         });
-        setEstimatedCost(prev => prev + IMAGE_GENERATION_PRICE_PER_IMAGE);
+        setEstimatedCost(prev => prev + (updates.length * IMAGE_GENERATION_PRICE_PER_IMAGE));
+        setSelectedFrameIndices([]); // Clear selection after regeneration
+    };
+
+    const handleFrameSelect = (index: number) => {
+        if (!isGenerationComplete) return;
+        setSelectedFrameIndices(prev => {
+            const newSelection = prev.includes(index)
+                ? prev.filter(i => i !== index)
+                : [...prev, index];
+            newSelection.sort((a, b) => a - b);
+            return newSelection;
+        });
     };
 
 
@@ -763,17 +813,40 @@ The values should be detailed string descriptions of the position and rotation o
                                     </div>
                                 </div>
                             )}
-                            {!isLoading && <h3 className="text-xl font-semibold mb-4 text-center">Generated Frames</h3>}
-                            <div className="grid grid-cols-3 gap-2 mt-4">
+                            {!isLoading && <h3 className="text-xl font-semibold mb-2 text-center">Generated Frames</h3>}
+                             {isGenerationComplete && (
+                                <div className="text-center mb-4">
+                                    <button
+                                        onClick={() => {
+                                            if (selectedFrameIndices.length > 0) {
+                                                setEditingFrameIndices(selectedFrameIndices);
+                                            }
+                                        }}
+                                        disabled={selectedFrameIndices.length === 0}
+                                        className="rounded-md bg-purple-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-purple-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                                    >
+                                        Correct {selectedFrameIndices.length > 0 ? `${selectedFrameIndices.length} ` : ''}Selected Frame(s)
+                                    </button>
+                                </div>
+                            )}
+                            <div className="grid grid-cols-3 gap-2">
                                 {generatedFrames.map((frame, index) => (
                                     frame ? 
-                                    <img 
-                                        key={index} 
-                                        src={frame} 
-                                        alt={`Frame ${index + 1}`} 
-                                        className="w-full aspect-square object-contain rounded-md bg-gray-700 cursor-pointer hover:opacity-80 transition-opacity"
-                                        onClick={() => isGenerationComplete && setEditingFrameIndex(index)}
-                                    />
+                                    <div key={index} className="relative">
+                                        <img 
+                                            src={frame} 
+                                            alt={`Frame ${index + 1}`} 
+                                            className={`w-full aspect-square object-contain rounded-md bg-gray-700 transition-all ${isGenerationComplete ? 'cursor-pointer hover:opacity-80' : ''} ${selectedFrameIndices.includes(index) ? 'ring-2 ring-offset-2 ring-offset-gray-800 ring-pink-500' : ''}`}
+                                            onClick={() => handleFrameSelect(index)}
+                                        />
+                                        {selectedFrameIndices.includes(index) && (
+                                            <div className="absolute top-1 right-1 bg-pink-500 rounded-full text-white p-0.5 pointer-events-none">
+                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                                </svg>
+                                            </div>
+                                        )}
+                                    </div>
                                     :
                                     <div key={index} className="w-full aspect-square rounded-md bg-gray-700 animate-pulse"></div>
                                 ))}
@@ -823,14 +896,14 @@ The values should be detailed string descriptions of the position and rotation o
                 </section>
             )}
             
-            {editingFrameIndex !== null && initialImage && (
-                <FrameCorrectorModal 
-                    frameIndex={editingFrameIndex}
+            {editingFrameIndices !== null && editingFrameIndices.length > 0 && initialImage && (
+                <FrameCorrectionModal 
+                    frameIndices={editingFrameIndices}
                     generatedFrames={generatedFrames}
                     initialImage={initialImage}
                     backgroundInstruction={backgroundInstruction}
-                    onClose={() => setEditingFrameIndex(null)}
-                    onRegenerate={handleFrameRegenerate}
+                    onClose={() => setEditingFrameIndices(null)}
+                    onRegenerate={handleFramesRegenerate}
                 />
             )}
 
